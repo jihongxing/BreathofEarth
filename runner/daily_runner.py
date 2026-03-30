@@ -102,7 +102,7 @@ class DailyRunner:
 
         # 数据校验
         try:
-            validate_prices(prices)
+            validate_prices(prices, assets=assets)
         except DataValidationError as e:
             msg = f"数据校验失败: {e}"
             logger.error(f"  {msg}")

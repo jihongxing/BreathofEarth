@@ -33,7 +33,7 @@ PORTFOLIOS = {
             "518880.SS": "黄金ETF",
             "MONEY": "货币基金",
         },
-        "data_source": "akshare_cn",  # 中国 A 股专用数据源
+        "data_source": None,  # 自动选择（优先本地 CSV）
     },
 }
 

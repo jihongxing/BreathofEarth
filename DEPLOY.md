@@ -50,23 +50,37 @@ crontab -e
 
 ## 中国大陆服务器注意事项
 
-Yahoo Finance 对中国大陆 IP 有限流。系统内置了双数据源自动切换：
-- 优先使用 yfinance（Yahoo Finance）
-- 被限流时自动切换到 akshare（国内数据源，通过新浪/东方财富获取美股数据）
+腾讯云等国内服务器无法直接访问 Yahoo Finance / 东方财富等金融 API。
+息壤采用"本地拉数据 → GitHub 中转 → 服务器读取"的数据管道：
 
-如果首次运行遇到 `YFRateLimitError`，直接强制使用 akshare：
+```
+你的电脑 (yfinance) → CSV → git push → GitHub → 服务器 git pull → daily_runner
+```
+
+### 本地电脑：每天拉数据并推送
 
 ```bash
-echo "XIRANG_DATA_SOURCE=akshare" >> /opt/xirang/.env
-source /opt/xirang/.env && export XIRANG_DATA_SOURCE
-python3 -m runner.daily_runner
+cd /你的本地项目目录
+python data/daily_fetch.py
 ```
 
-cron 中也要加上环境变量：
+这会拉取中美两个市场的最新行情，保存为 `data/live_us.csv` 和 `data/live_cn.csv`，然后自动 git push。
+
+本地 cron（macOS/Linux）或任务计划（Windows）：
 
 ```cron
-0 6 * * 2-6 cd /opt/xirang && XIRANG_DATA_SOURCE=akshare /usr/bin/python3 -m runner.daily_runner >> /opt/xirang/logs/cron.log 2>&1
+# macOS/Linux: 每天 18:00 拉取（美股收盘后）
+0 18 * * 1-5 cd /你的项目目录 && python3 data/daily_fetch.py >> /tmp/xirang_fetch.log 2>&1
 ```
+
+### 服务器：先拉数据再运行
+
+```cron
+# 服务器 cron：每天 06:30 先 git pull 再运行
+30 6 * * 2-6 cd /opt/xirang && git pull -q && /usr/bin/python3 -m runner.daily_runner >> /opt/xirang/logs/cron.log 2>&1
+```
+
+服务器的 daily_runner 会自动从本地 CSV 读取数据，不需要访问任何外部 API。
 
 ## 配置通知（可选）
 

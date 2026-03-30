@@ -10,6 +10,7 @@
 import os
 import logging
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Optional
 
 import pandas as pd
@@ -32,17 +33,75 @@ class MarketDataService:
 
     def fetch_latest(self, lookback_days: int = 60) -> pd.DataFrame:
         source = self.data_source or os.environ.get("XIRANG_DATA_SOURCE", "").lower()
+
+        # 优先从本地 CSV 读取（服务器模式）
+        if source == "local" or source == "":
+            try:
+                return self._fetch_local_csv()
+            except Exception as e:
+                logger.warning(f"本地 CSV 读取失败: {e}，尝试在线数据源...")
+
         if source == "akshare":
             return self._fetch_akshare_us(lookback_days)
         elif source == "akshare_cn":
             return self._fetch_akshare_cn(lookback_days)
+
+        # 中国标的自动用 akshare_cn
         if any(t.endswith(".SS") or t.endswith(".SZ") or t == "MONEY" for t in self.assets):
-            return self._fetch_akshare_cn(lookback_days)
+            try:
+                return self._fetch_local_csv()
+            except Exception:
+                return self._fetch_akshare_cn(lookback_days)
+
         try:
             return self._fetch_yfinance(lookback_days)
         except Exception as e:
             logger.warning(f"yfinance 失败: {e}，切换 akshare...")
             return self._fetch_akshare_us(lookback_days)
+
+    def _fetch_local_csv(self) -> pd.DataFrame:
+        """
+        从本地 CSV 文件读取数据。
+
+        服务器通过 git pull 获取由本地电脑推送的最新 CSV。
+        文件路径：data/live_us.csv 或 data/live_cn.csv
+        """
+        data_dir = Path(__file__).parent.parent / "data"
+
+        # 判断是美股还是中国标的
+        is_cn = any(t.endswith(".SS") or t.endswith(".SZ") or t == "MONEY" for t in self.assets)
+        csv_path = data_dir / ("live_cn.csv" if is_cn else "live_us.csv")
+
+        if not csv_path.exists():
+            raise FileNotFoundError(f"数据文件不存在: {csv_path}，请先在本地运行 python data/daily_fetch.py")
+
+        # 检查数据新鲜度
+        ts_path = data_dir / "last_update.txt"
+        if ts_path.exists():
+            last_update = ts_path.read_text().strip()
+            logger.info(f"  数据最后更新: {last_update}")
+
+        prices = pd.read_csv(csv_path, index_col="date", parse_dates=True)
+
+        # 中国组合需要模拟货币基金
+        if is_cn and "MONEY" in self.assets and "MONEY" not in prices.columns:
+            daily_rate = (1.02 ** (1 / 252)) - 1
+            money = pd.Series(index=prices.index, dtype=float)
+            money.iloc[0] = 100.0
+            for j in range(1, len(money)):
+                money.iloc[j] = money.iloc[j - 1] * (1 + daily_rate)
+            prices["MONEY"] = money
+
+        # 确保所有需要的列都在
+        missing = [a for a in self.assets if a not in prices.columns]
+        if missing:
+            raise RuntimeError(f"CSV 中缺少列: {missing}")
+
+        prices = prices[self.assets].ffill().bfill().dropna()
+        prices.index.name = "date"
+        self._cache = prices
+        logger.info(f"数据源: 本地 CSV ({csv_path.name}, {len(prices)} 行)")
+        return prices
 
     def _fetch_yfinance(self, lookback_days):
         import yfinance as yf

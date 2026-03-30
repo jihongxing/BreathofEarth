@@ -22,8 +22,11 @@ env/
 db/*.db
 db/backups/
 
-# 数据文件（可通过 data_loader.py 重新生成）
-data/*.csv
+# 数据文件（回测数据可重新生成）
+data/etf_daily.csv
+data/cpi_monthly.csv
+data/monthly_aligned.csv
+# 注意：data/live_*.csv 和 data/last_update.txt 不排除，它们是数据管道的一部分
 
 # 回测输出
 backtest/output/
