@@ -24,7 +24,7 @@ import sys
 import math
 from datetime import datetime, timedelta
 from db.database import Database
-from engine.config import ASSETS
+from engine.config import ASSETS, PORTFOLIOS
 
 
 # ── ASCII 净值走势图 ──────────────────────────────────
@@ -108,19 +108,25 @@ def calc_underwater(navs: list[float]) -> tuple[int, int]:
 
 # ── 主报告 ────────────────────────────────────────────
 
-def generate_report(days: int = 0):
+def generate_report(days: int = 0, portfolio_id: str = "default"):
     db = Database()
+    pf_config = PORTFOLIOS.get(portfolio_id)
+    pf_name = pf_config["name"] if pf_config else portfolio_id
+    pf_currency = pf_config["currency"] if pf_config else "$"
+    pf_assets = pf_config["assets"] if pf_config else ASSETS
 
     # 拉取快照
     with db._conn() as conn:
         if days > 0:
             since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
             rows = conn.execute(
-                "SELECT * FROM daily_snapshots WHERE date >= ? ORDER BY date ASC", (since,)
+                "SELECT * FROM daily_snapshots WHERE portfolio_id = ? AND date >= ? ORDER BY date ASC",
+                (portfolio_id, since),
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT * FROM daily_snapshots ORDER BY date ASC"
+                "SELECT * FROM daily_snapshots WHERE portfolio_id = ? ORDER BY date ASC",
+                (portfolio_id,),
             ).fetchall()
 
     if not rows:
@@ -162,10 +168,10 @@ def generate_report(days: int = 0):
 
     print()
     print("=" * 68)
-    print("  [息壤 Xi-Rang] 仿真运行报告 (Paper Trading Report)")
+    print("  [息壤 Xi-Rang] " + pf_name + " · " + period)
     print("=" * 68)
     print(f"  时间范围:       {first['date']} ~ {last['date']} ({total_days} 个交易日)")
-    print(f"  起始 / 当前:    ${first_nav:,.2f}  ➔  ${last_nav:,.2f}")
+    print(f"  起始 / 当前:    {pf_currency}{first_nav:,.2f}  ➔  {pf_currency}{last_nav:,.2f}")
     print(f"  总收益率:       {total_return:+.2%}")
     if years > 0.1:
         print(f"  年化收益(CAGR): {cagr:.2%}")
@@ -312,23 +318,29 @@ def generate_report(days: int = 0):
     with db._conn() as conn:
         if days > 0:
             run_rows = conn.execute(
-                "SELECT status, COUNT(*) as cnt FROM daily_runs WHERE date >= ? GROUP BY status", (since,)
+                "SELECT status, COUNT(*) as cnt FROM daily_runs WHERE portfolio_id = ? AND date >= ? GROUP BY status",
+                (portfolio_id, since),
             ).fetchall()
             tx_rows = conn.execute(
-                "SELECT * FROM transactions WHERE date >= ? ORDER BY date ASC", (since,)
+                "SELECT * FROM transactions WHERE portfolio_id = ? AND date >= ? ORDER BY date ASC",
+                (portfolio_id, since),
             ).fetchall()
             risk_rows = conn.execute(
-                "SELECT * FROM risk_events WHERE date >= ? ORDER BY date ASC", (since,)
+                "SELECT * FROM risk_events WHERE portfolio_id = ? AND date >= ? ORDER BY date ASC",
+                (portfolio_id, since),
             ).fetchall()
         else:
             run_rows = conn.execute(
-                "SELECT status, COUNT(*) as cnt FROM daily_runs GROUP BY status"
+                "SELECT status, COUNT(*) as cnt FROM daily_runs WHERE portfolio_id = ? GROUP BY status",
+                (portfolio_id,),
             ).fetchall()
             tx_rows = conn.execute(
-                "SELECT * FROM transactions ORDER BY date ASC"
+                "SELECT * FROM transactions WHERE portfolio_id = ? ORDER BY date ASC",
+                (portfolio_id,),
             ).fetchall()
             risk_rows = conn.execute(
-                "SELECT * FROM risk_events ORDER BY date ASC"
+                "SELECT * FROM risk_events WHERE portfolio_id = ? ORDER BY date ASC",
+                (portfolio_id,),
             ).fetchall()
 
     run_stats = {r["status"]: r["cnt"] for r in run_rows}
@@ -423,4 +435,16 @@ if __name__ == "__main__":
         idx = sys.argv.index("--days")
         if idx + 1 < len(sys.argv):
             days = int(sys.argv[idx + 1])
-    generate_report(days)
+
+    only = None
+    if "--portfolio" in sys.argv:
+        idx = sys.argv.index("--portfolio")
+        if idx + 1 < len(sys.argv):
+            only = sys.argv[idx + 1]
+
+    if only:
+        generate_report(days, portfolio_id=only)
+    else:
+        # 遍历所有组合
+        for pid in PORTFOLIOS:
+            generate_report(days, portfolio_id=pid)

@@ -46,6 +46,21 @@ class Database:
                 raise ValueError(f"组合 {portfolio_id} 不存在")
             return dict(row)
 
+    def ensure_portfolio(self, portfolio_id: str, assets: list):
+        """确保组合存在，不存在则创建"""
+        with self._conn() as conn:
+            row = conn.execute("SELECT 1 FROM portfolios WHERE id = ?", (portfolio_id,)).fetchone()
+            if row is None:
+                initial_nav = 100000.0
+                n = len(assets)
+                positions = [initial_nav / n] * n
+                conn.execute(
+                    """INSERT INTO portfolios (id, state, nav, positions, high_water_mark,
+                       cooldown_counter, rebalance_count, protection_count)
+                       VALUES (?, 'IDLE', ?, ?, ?, 0, 0, 0)""",
+                    (portfolio_id, initial_nav, json.dumps(positions), initial_nav),
+                )
+
     def update_portfolio(self, portfolio_id: str = "default", **kwargs):
         sets = ", ".join(f"{k} = ?" for k in kwargs)
         values = list(kwargs.values()) + [portfolio_id]

@@ -22,36 +22,39 @@ class DataValidationError(Exception):
     pass
 
 
-def validate_prices(prices: pd.DataFrame) -> None:
+def validate_prices(prices: pd.DataFrame, assets: list = None) -> None:
     """
     校验价格数据的合理性。
 
     Raises:
         DataValidationError 如果数据异常
     """
+    check_assets = assets or ASSETS
+
     # 1. 检查必要列
-    missing = [a for a in ASSETS if a not in prices.columns]
+    missing = [a for a in check_assets if a not in prices.columns]
     if missing:
         raise DataValidationError(f"缺少资产数据: {missing}")
 
     # 2. 检查 NaN / Inf
-    if prices[ASSETS].isna().any().any():
-        nan_cols = prices[ASSETS].columns[prices[ASSETS].isna().any()].tolist()
+    check_cols = [a for a in check_assets if a in prices.columns]
+    if prices[check_cols].isna().any().any():
+        nan_cols = prices[check_cols].columns[prices[check_cols].isna().any()].tolist()
         raise DataValidationError(f"存在 NaN 值: {nan_cols}")
 
-    if np.isinf(prices[ASSETS].values).any():
+    if np.isinf(prices[check_cols].values).any():
         raise DataValidationError("存在 Inf 值")
 
     # 3. 检查价格为正
-    for asset in ASSETS:
+    for asset in check_cols:
         if (prices[asset] <= 0).any():
             bad_dates = prices.index[prices[asset] <= 0].tolist()
             raise DataValidationError(f"{asset} 存在非正价格，日期: {bad_dates[:3]}")
 
     # 4. 检查单日涨跌幅（最后一天 vs 倒数第二天）
     if len(prices) >= 2:
-        last_returns = prices[ASSETS].iloc[-1] / prices[ASSETS].iloc[-2] - 1
-        for asset in ASSETS:
+        last_returns = prices[check_cols].iloc[-1] / prices[check_cols].iloc[-2] - 1
+        for asset in check_cols:
             ret = last_returns[asset]
             if abs(ret) > 0.25:
                 raise DataValidationError(

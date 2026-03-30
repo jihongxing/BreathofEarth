@@ -1,12 +1,10 @@
 """
 息壤（Xi-Rang）市场数据服务
 
-双数据源策略：
-1. 优先使用 yfinance（Yahoo Finance）
-2. 如果被限流或网络不通，自动切换到 akshare（国内数据源）
-
-akshare 通过新浪/东方财富等国内接口拉取美股 ETF 数据，
-对中国大陆服务器完全友好，无需代理。
+双数据源 + 多市场支持：
+- yfinance: 美股 ETF（优先）
+- akshare: 美股 ETF 后备 + 中国 A 股 ETF
+- 货币基金(MONEY): 年化 2% 模拟
 """
 
 import os
@@ -21,145 +19,138 @@ from engine.config import ASSETS, CORR_WINDOW
 
 logger = logging.getLogger("xirang.market_data")
 
-# akshare 对应的美股代码（与 yfinance 相同）
-AKSHARE_SYMBOLS = {
-    "SPY": "SPY",
-    "TLT": "TLT",
-    "GLD": "GLD",
-    "SHV": "SHV",
-}
+AKSHARE_US_SYMBOLS = {"SPY": "SPY", "TLT": "TLT", "GLD": "GLD", "SHV": "SHV"}
 
 
 class MarketDataService:
-    """市场数据服务（双数据源）"""
 
-    def __init__(self, db=None):
+    def __init__(self, db=None, assets=None, data_source=None):
         self.db = db
+        self.assets = assets or ASSETS
+        self.data_source = data_source
         self._cache: Optional[pd.DataFrame] = None
 
     def fetch_latest(self, lookback_days: int = 60) -> pd.DataFrame:
-        """
-        拉取最近 N 天的 ETF 数据。
-
-        优先 yfinance，失败后自动切换 akshare。
-        可通过环境变量 XIRANG_DATA_SOURCE=akshare 强制使用 akshare。
-        """
-        force_source = os.environ.get("XIRANG_DATA_SOURCE", "").lower()
-
-        if force_source == "akshare":
-            return self._fetch_akshare(lookback_days)
-
-        # 优先 yfinance
+        source = self.data_source or os.environ.get("XIRANG_DATA_SOURCE", "").lower()
+        if source == "akshare":
+            return self._fetch_akshare_us(lookback_days)
+        elif source == "akshare_cn":
+            return self._fetch_akshare_cn(lookback_days)
+        if any(t.endswith(".SS") or t.endswith(".SZ") or t == "MONEY" for t in self.assets):
+            return self._fetch_akshare_cn(lookback_days)
         try:
             return self._fetch_yfinance(lookback_days)
         except Exception as e:
-            logger.warning(f"yfinance 失败: {e}，切换到 akshare...")
-            return self._fetch_akshare(lookback_days)
+            logger.warning(f"yfinance 失败: {e}，切换 akshare...")
+            return self._fetch_akshare_us(lookback_days)
 
-    def _fetch_yfinance(self, lookback_days: int) -> pd.DataFrame:
-        """从 Yahoo Finance 拉取"""
+    def _fetch_yfinance(self, lookback_days):
         import yfinance as yf
-
         end = datetime.now()
         start = end - timedelta(days=lookback_days + 10)
-
         frames = {}
-        for ticker in ASSETS:
+        for ticker in self.assets:
             df = yf.download(ticker, start=start, end=end, auto_adjust=False, progress=False)
             if df.empty:
-                raise RuntimeError(f"无法获取 {ticker} 数据，请检查网络连接")
-
+                raise RuntimeError(f"无法获取 {ticker}")
             if isinstance(df.columns, pd.MultiIndex):
-                adj_close = df["Adj Close"]
-                if isinstance(adj_close, pd.DataFrame):
-                    adj_close = adj_close.iloc[:, 0]
+                adj = df["Adj Close"]
+                if isinstance(adj, pd.DataFrame): adj = adj.iloc[:, 0]
             else:
-                adj_close = df["Adj Close"]
-
-            frames[ticker] = adj_close
-
+                adj = df["Adj Close"]
+            frames[ticker] = adj
         prices = pd.DataFrame(frames).ffill().bfill()
         prices.index.name = "date"
         self._cache = prices
         logger.info("数据源: yfinance")
         return prices
 
-    def _fetch_akshare(self, lookback_days: int) -> pd.DataFrame:
-        """
-        从 akshare 拉取美股 ETF 数据。
-
-        akshare 通过国内接口获取美股数据，无需代理。
-        """
+    def _fetch_akshare_us(self, lookback_days):
         try:
             import akshare as ak
         except ImportError:
-            raise RuntimeError(
-                "akshare 未安装。请运行: pip3 install akshare\n"
-                "akshare 是国内金融数据源，对中国大陆服务器友好，无需代理。"
-            )
-
+            raise RuntimeError("akshare 未安装: pip3 install akshare")
         end = datetime.now()
         start = end - timedelta(days=lookback_days + 10)
-        start_str = start.strftime("%Y%m%d")
-        end_str = end.strftime("%Y%m%d")
-
+        s, e = start.strftime("%Y%m%d"), end.strftime("%Y%m%d")
         frames = {}
-        for ticker in ASSETS:
-            ak_symbol = AKSHARE_SYMBOLS.get(ticker, ticker)
-            try:
-                # akshare 的美股日线接口
-                df = ak.stock_us_daily(symbol=ak_symbol, adjust="qfq")
-                if df.empty:
-                    raise RuntimeError(f"akshare 无 {ticker} 数据")
-
-                df["date"] = pd.to_datetime(df["date"])
-                df = df.set_index("date").sort_index()
-                df = df[start_str:end_str]
-
-                frames[ticker] = df["close"]
-                logger.info(f"  akshare {ticker}: {len(df)} 条")
-            except Exception as e:
-                raise RuntimeError(f"akshare 获取 {ticker} 失败: {e}")
-
+        for ticker in self.assets:
+            sym = AKSHARE_US_SYMBOLS.get(ticker, ticker)
+            df = ak.stock_us_daily(symbol=sym, adjust="qfq")
+            if df.empty: raise RuntimeError(f"akshare 无 {ticker}")
+            df["date"] = pd.to_datetime(df["date"])
+            df = df.set_index("date").sort_index()[s:e]
+            frames[ticker] = df["close"]
+            logger.info(f"  akshare_us {ticker}: {len(df)} 条")
         prices = pd.DataFrame(frames).ffill().bfill()
         prices.index.name = "date"
         self._cache = prices
-        logger.info("数据源: akshare")
+        logger.info("数据源: akshare (美股)")
         return prices
 
-    def get_daily_returns(self, prices: Optional[pd.DataFrame] = None) -> pd.DataFrame:
-        """计算日收益率"""
-        if prices is None:
-            prices = self._cache
+    def _fetch_akshare_cn(self, lookback_days):
+        try:
+            import akshare as ak
+        except ImportError:
+            raise RuntimeError("akshare 未安装: pip3 install akshare")
+        end = datetime.now()
+        start = end - timedelta(days=lookback_days + 10)
+        s, e = start.strftime("%Y%m%d"), end.strftime("%Y%m%d")
+        frames = {}
+        for ticker in self.assets:
+            if ticker == "MONEY": continue
+            code = ticker.replace(".SS", "").replace(".SZ", "")
+            try:
+                df = ak.fund_etf_hist_em(symbol=code, period="daily",
+                                         start_date=s, end_date=e, adjust="qfq")
+                if df.empty: raise RuntimeError(f"无数据")
+                df["日期"] = pd.to_datetime(df["日期"])
+                df = df.set_index("日期").sort_index()
+                frames[ticker] = df["收盘"].astype(float)
+                logger.info(f"  akshare_cn {ticker}: {len(df)} 条")
+            except Exception as ex:
+                logger.warning(f"  akshare_cn {ticker} 失败，尝试 yfinance...")
+                import yfinance as yf
+                ydf = yf.download(ticker, start=start, end=end, auto_adjust=False, progress=False)
+                if ydf.empty: raise RuntimeError(f"{ticker} 所有数据源失败")
+                if isinstance(ydf.columns, pd.MultiIndex):
+                    adj = ydf["Adj Close"]
+                    if isinstance(adj, pd.DataFrame): adj = adj.iloc[:, 0]
+                else:
+                    adj = ydf["Adj Close"]
+                frames[ticker] = adj
+                logger.info(f"  yfinance {ticker}: {len(adj)} 条 (备用)")
+        prices = pd.DataFrame(frames).ffill().bfill()
+        if "MONEY" in self.assets:
+            daily_rate = (1.02 ** (1/252)) - 1
+            money = pd.Series(index=prices.index, dtype=float)
+            money.iloc[0] = 100.0
+            for j in range(1, len(money)):
+                money.iloc[j] = money.iloc[j-1] * (1 + daily_rate)
+            prices["MONEY"] = money
+        prices = prices.dropna()
+        prices.index.name = "date"
+        self._cache = prices
+        logger.info("数据源: akshare (A股)")
+        return prices
+
+    def get_daily_returns(self, prices=None):
+        if prices is None: prices = self._cache
         return prices.pct_change().fillna(0)
 
-    def get_risk_indicators(self, prices: Optional[pd.DataFrame] = None) -> dict:
-        """
-        计算风控所需的指标（最新一天的值）。
-
-        Returns:
-            {
-                "spy_tlt_corr": float,
-                "spy_30d_ret": float,
-                "tlt_30d_ret": float,
-            }
-        """
-        if prices is None:
-            prices = self._cache
-
-        returns = prices.pct_change().fillna(0)
-
-        spy_tlt_corr = returns["SPY"].rolling(window=CORR_WINDOW).corr(returns["TLT"])
-        spy_30d_ret = prices["SPY"].pct_change(CORR_WINDOW)
-        tlt_30d_ret = prices["TLT"].pct_change(CORR_WINDOW)
-
+    def get_risk_indicators(self, prices=None):
+        if prices is None: prices = self._cache
+        cols = list(prices.columns)
+        stock, bond = cols[0], cols[1]
+        ret = prices.pct_change().fillna(0)
+        corr = ret[stock].rolling(CORR_WINDOW).corr(ret[bond])
+        s30 = prices[stock].pct_change(CORR_WINDOW)
+        b30 = prices[bond].pct_change(CORR_WINDOW)
         return {
-            "spy_tlt_corr": float(spy_tlt_corr.iloc[-1]) if not pd.isna(spy_tlt_corr.iloc[-1]) else 0.0,
-            "spy_30d_ret": float(spy_30d_ret.iloc[-1]) if not pd.isna(spy_30d_ret.iloc[-1]) else 0.0,
-            "tlt_30d_ret": float(tlt_30d_ret.iloc[-1]) if not pd.isna(tlt_30d_ret.iloc[-1]) else 0.0,
+            "spy_tlt_corr": float(corr.iloc[-1]) if not pd.isna(corr.iloc[-1]) else 0.0,
+            "spy_30d_ret": float(s30.iloc[-1]) if not pd.isna(s30.iloc[-1]) else 0.0,
+            "tlt_30d_ret": float(b30.iloc[-1]) if not pd.isna(b30.iloc[-1]) else 0.0,
         }
 
-    def get_today_returns(self, prices: Optional[pd.DataFrame] = None) -> np.ndarray:
-        """获取最新一天的各资产收益率"""
-        returns = self.get_daily_returns(prices)
-        return returns.iloc[-1].values
+    def get_today_returns(self, prices=None):
+        return self.get_daily_returns(prices).iloc[-1].values
