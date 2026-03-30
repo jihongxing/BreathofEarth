@@ -1,0 +1,7 @@
+yfinance>=0.2.36
+pandas>=2.0
+pandas-datareader>=0.10
+numpy>=1.24
+matplotlib>=3.7
+fastapi>=0.110
+uvicorn>=0.29

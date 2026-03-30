@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# 环境
+.env
+.venv/
+venv/
+env/
+
+# 敏感信息（绝对不能提交）
+*.key
+*.pem
+*.secret
+
+# 数据库（包含运行状态和历史数据）
+db/*.db
+db/backups/
+
+# 数据文件（可通过 data_loader.py 重新生成）
+data/*.csv
+
+# 回测输出
+backtest/output/
+
+# 运行日志
+logs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
