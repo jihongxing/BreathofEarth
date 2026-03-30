@@ -209,24 +209,43 @@ python -m runner.report
 
 ## 部署到服务器
 
-```bash
-# 上传代码
-git clone <repo> /opt/xirang && cd /opt/xirang
-pip install -r requirements.txt
+息壤采用"本地拉数据 → GitHub 中转 → 服务器读取"的数据管道，解决国内服务器无法访问金融 API 的问题。
 
-# 首次运行
-python -m runner.daily_runner
-
-# 配置 cron（每个工作日美东收盘后运行）
-crontab -e
-# 0 22 * * 1-5 cd /opt/xirang && python3 -m runner.daily_runner >> logs/cron.log 2>&1
-
-# 配置通知（可选）
-echo "TELEGRAM_BOT_TOKEN=xxx" >> .env
-echo "TELEGRAM_CHAT_ID=xxx" >> .env
+```
+本地电脑 (yfinance) → CSV → git push → GitHub → 服务器 git pull → daily_runner
 ```
 
-详见 [docs/08-部署指南.md](docs/08-部署指南.md)。
+### 服务器端
+
+```bash
+git clone https://github.com/jihongxing/BreathofEarth.git /opt/xirang
+cd /opt/xirang
+pip3 install -r requirements.txt
+
+# 首次运行
+python3 -m runner.daily_runner --force
+
+# 配置 cron（每天 06:30 先拉数据再运行，北京时间）
+crontab -e
+# 30 6 * * 2-6 cd /opt/xirang && git pull -q && /usr/bin/python3 -m runner.daily_runner >> /opt/xirang/logs/cron.log 2>&1
+```
+
+### 本地电脑（Windows）
+
+每天自动拉取中美行情并推送到 GitHub：
+
+```powershell
+# PowerShell（管理员）运行一次即可
+$action = New-ScheduledTaskAction -Execute "python" -Argument "D:\codeSpace\BreathofEarth\data\daily_fetch.py" -WorkingDirectory "D:\codeSpace\BreathofEarth"
+$trigger1 = New-ScheduledTaskTrigger -Daily -At 11:05AM
+$trigger2 = New-ScheduledTaskTrigger -Daily -At 11:05PM
+$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -DontStopIfGoingOnBatteries -AllowStartIfOnBatteries
+Register-ScheduledTask -TaskName "XiRang-DailyFetch" -Action $action -Trigger $trigger1,$trigger2 -Settings $settings -Description "息壤每日数据拉取" -RunLevel Highest
+```
+
+每天 11:05 和 23:05 各跑一次，`-StartWhenAvailable` 确保错过的任务在开机后补跑。
+
+详见 [DEPLOY.md](DEPLOY.md)。
 
 ## 日常命令
 

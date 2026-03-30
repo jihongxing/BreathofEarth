@@ -59,6 +59,8 @@ crontab -e
 
 ### 本地电脑：每天拉数据并推送
 
+手动运行：
+
 ```bash
 cd /你的本地项目目录
 python data/daily_fetch.py
@@ -66,11 +68,32 @@ python data/daily_fetch.py
 
 这会拉取中美两个市场的最新行情，保存为 `data/live_us.csv` 和 `data/live_cn.csv`，然后自动 git push。
 
-本地 cron（macOS/Linux）或任务计划（Windows）：
+#### Windows 定时任务
+
+PowerShell（管理员）运行：
+
+```powershell
+$action = New-ScheduledTaskAction -Execute "python" -Argument "D:\codeSpace\BreathofEarth\data\daily_fetch.py" -WorkingDirectory "D:\codeSpace\BreathofEarth"
+$trigger1 = New-ScheduledTaskTrigger -Daily -At 11:05AM
+$trigger2 = New-ScheduledTaskTrigger -Daily -At 11:05PM
+$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -DontStopIfGoingOnBatteries -AllowStartIfOnBatteries
+Register-ScheduledTask -TaskName "XiRang-DailyFetch" -Action $action -Trigger $trigger1,$trigger2 -Settings $settings -Description "息壤每日数据拉取" -RunLevel Highest
+```
+
+说明：
+- 每天 11:05 和 23:05 各跑一次，确保至少命中一个开机时段
+- `-StartWhenAvailable`：如果到点时电脑没开，开机后会立刻补跑
+- 同一天跑两次无副作用：第二次 git push 时无变更会自动跳过
+
+验证：`Get-ScheduledTask -TaskName "XiRang-DailyFetch"`
+手动测试：`Start-ScheduledTask -TaskName "XiRang-DailyFetch"`
+删除任务：`Unregister-ScheduledTask -TaskName "XiRang-DailyFetch" -Confirm:$false`
+
+#### macOS / Linux 定时任务
 
 ```cron
-# macOS/Linux: 每天 18:00 拉取（美股收盘后）
-0 18 * * 1-5 cd /你的项目目录 && python3 data/daily_fetch.py >> /tmp/xirang_fetch.log 2>&1
+# 每天 11:05 和 23:05 各跑一次
+5 11,23 * * * cd /你的项目目录 && python3 data/daily_fetch.py >> /tmp/xirang_fetch.log 2>&1
 ```
 
 ### 服务器：先拉数据再运行
