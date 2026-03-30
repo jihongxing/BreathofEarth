@@ -1,24 +1,37 @@
 """
 息壤（Xi-Rang）市场数据服务
 
-职责：
-1. 从 Yahoo Finance 拉取最新 ETF 价格
-2. 计算日收益率
-3. 计算 SPY-TLT 滚动相关性和 30 日收益
-4. 提供历史数据查询
+双数据源策略：
+1. 优先使用 yfinance（Yahoo Finance）
+2. 如果被限流或网络不通，自动切换到 akshare（国内数据源）
+
+akshare 通过新浪/东方财富等国内接口拉取美股 ETF 数据，
+对中国大陆服务器完全友好，无需代理。
 """
 
+import os
+import logging
 from datetime import datetime, timedelta
 from typing import Optional
+
 import pandas as pd
 import numpy as np
-import yfinance as yf
 
 from engine.config import ASSETS, CORR_WINDOW
 
+logger = logging.getLogger("xirang.market_data")
+
+# akshare 对应的美股代码（与 yfinance 相同）
+AKSHARE_SYMBOLS = {
+    "SPY": "SPY",
+    "TLT": "TLT",
+    "GLD": "GLD",
+    "SHV": "SHV",
+}
+
 
 class MarketDataService:
-    """市场数据服务"""
+    """市场数据服务（双数据源）"""
 
     def __init__(self, db=None):
         self.db = db
@@ -27,10 +40,28 @@ class MarketDataService:
     def fetch_latest(self, lookback_days: int = 60) -> pd.DataFrame:
         """
         拉取最近 N 天的 ETF 数据。
-        lookback_days 需要 >= 30 以计算滚动相关性。
+
+        优先 yfinance，失败后自动切换 akshare。
+        可通过环境变量 XIRANG_DATA_SOURCE=akshare 强制使用 akshare。
         """
+        force_source = os.environ.get("XIRANG_DATA_SOURCE", "").lower()
+
+        if force_source == "akshare":
+            return self._fetch_akshare(lookback_days)
+
+        # 优先 yfinance
+        try:
+            return self._fetch_yfinance(lookback_days)
+        except Exception as e:
+            logger.warning(f"yfinance 失败: {e}，切换到 akshare...")
+            return self._fetch_akshare(lookback_days)
+
+    def _fetch_yfinance(self, lookback_days: int) -> pd.DataFrame:
+        """从 Yahoo Finance 拉取"""
+        import yfinance as yf
+
         end = datetime.now()
-        start = end - timedelta(days=lookback_days + 10)  # 多拉几天防止节假日
+        start = end - timedelta(days=lookback_days + 10)
 
         frames = {}
         for ticker in ASSETS:
@@ -50,6 +81,50 @@ class MarketDataService:
         prices = pd.DataFrame(frames).ffill().bfill()
         prices.index.name = "date"
         self._cache = prices
+        logger.info("数据源: yfinance")
+        return prices
+
+    def _fetch_akshare(self, lookback_days: int) -> pd.DataFrame:
+        """
+        从 akshare 拉取美股 ETF 数据。
+
+        akshare 通过国内接口获取美股数据，无需代理。
+        """
+        try:
+            import akshare as ak
+        except ImportError:
+            raise RuntimeError(
+                "akshare 未安装。请运行: pip3 install akshare\n"
+                "akshare 是国内金融数据源，对中国大陆服务器友好，无需代理。"
+            )
+
+        end = datetime.now()
+        start = end - timedelta(days=lookback_days + 10)
+        start_str = start.strftime("%Y%m%d")
+        end_str = end.strftime("%Y%m%d")
+
+        frames = {}
+        for ticker in ASSETS:
+            ak_symbol = AKSHARE_SYMBOLS.get(ticker, ticker)
+            try:
+                # akshare 的美股日线接口
+                df = ak.stock_us_daily(symbol=ak_symbol, adjust="qfq")
+                if df.empty:
+                    raise RuntimeError(f"akshare 无 {ticker} 数据")
+
+                df["date"] = pd.to_datetime(df["date"])
+                df = df.set_index("date").sort_index()
+                df = df[start_str:end_str]
+
+                frames[ticker] = df["close"]
+                logger.info(f"  akshare {ticker}: {len(df)} 条")
+            except Exception as e:
+                raise RuntimeError(f"akshare 获取 {ticker} 失败: {e}")
+
+        prices = pd.DataFrame(frames).ffill().bfill()
+        prices.index.name = "date"
+        self._cache = prices
+        logger.info("数据源: akshare")
         return prices
 
     def get_daily_returns(self, prices: Optional[pd.DataFrame] = None) -> pd.DataFrame:
@@ -64,9 +139,9 @@ class MarketDataService:
 
         Returns:
             {
-                "spy_tlt_corr": float,  # 30日滚动相关性
-                "spy_30d_ret": float,   # SPY 30日收益
-                "tlt_30d_ret": float,   # TLT 30日收益
+                "spy_tlt_corr": float,
+                "spy_30d_ret": float,
+                "tlt_30d_ret": float,
             }
         """
         if prices is None:

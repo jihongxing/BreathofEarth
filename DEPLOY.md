@@ -48,6 +48,26 @@ crontab -e
 
 注意：北京时间用周二到周六，因为北京周二 06:00 = 美东周一 17:00。
 
+## 中国大陆服务器注意事项
+
+Yahoo Finance 对中国大陆 IP 有限流。系统内置了双数据源自动切换：
+- 优先使用 yfinance（Yahoo Finance）
+- 被限流时自动切换到 akshare（国内数据源，通过新浪/东方财富获取美股数据）
+
+如果首次运行遇到 `YFRateLimitError`，直接强制使用 akshare：
+
+```bash
+echo "XIRANG_DATA_SOURCE=akshare" >> /opt/xirang/.env
+source /opt/xirang/.env && export XIRANG_DATA_SOURCE
+python3 -m runner.daily_runner
+```
+
+cron 中也要加上环境变量：
+
+```cron
+0 6 * * 2-6 cd /opt/xirang && XIRANG_DATA_SOURCE=akshare /usr/bin/python3 -m runner.daily_runner >> /opt/xirang/logs/cron.log 2>&1
+```
+
 ## 配置通知（可选）
 
 ```bash
