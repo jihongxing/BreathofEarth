@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>息壤 Xi-Rang</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏔️</text></svg>">
+<script src="/static/chart.min.js"></script>
+<link rel="stylesheet" href="/static/tailwind-local.css">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="bg-bg text-gray-200 min-h-screen font-sans antialiased">
+
+<!-- Toast 容器 -->
+<div id="toast-container" class="fixed top-4 right-4 z-[999] flex flex-col gap-2 pointer-events-none" aria-live="polite" aria-atomic="true"></div>
+
+<!-- 登录页 -->
+<div id="login-page" class="page">
+  <div class="min-h-screen flex items-center justify-center bg-gradient-to-br from-[#0a0d14] via-[#0f1117] to-[#141824]">
+  <div class="w-full max-w-sm mx-4">
+    <div class="flex justify-end mb-4">
+      <div class="inline-flex gap-1 bg-white/5 rounded-lg p-1">
+        <button class="lang-btn px-3 py-1 rounded-md text-xs font-semibold transition-all duration-200 hover:bg-white/10 text-gray-400" data-lang="zh" onclick="setLang('zh')" aria-pressed="false">中</button>
+        <button class="lang-btn px-3 py-1 rounded-md text-xs font-semibold transition-all duration-200 hover:bg-white/10 text-gray-400" data-lang="en" onclick="setLang('en')" aria-pressed="false">EN</button>
+      </div>
+    </div>
+    <div class="bg-surface rounded-2xl shadow-2xl border border-white/5 p-8 text-center backdrop-blur-xl">
+      <div class="mb-6">
+        <div class="w-14 h-14 mx-auto mb-3 rounded-xl bg-indigo-500/10 flex items-center justify-center">
+          <span class="text-2xl" role="img" aria-label="mountain">🏔️</span>
+        </div>
+        <h1 class="text-2xl font-bold text-white tracking-tight" data-i18n="appName">息壤</h1>
+        <p class="text-sm text-gray-500 mt-1" data-i18n="appSubtitle">家族财富自动化配置系统</p>
+      </div>
+      <form id="login-form" class="space-y-4 text-left" novalidate>
+        <div>
+          <label for="login-user" class="block text-xs font-medium text-gray-400 mb-1.5" data-i18n="username">用户名</label>
+          <input type="text" id="login-user" required autocomplete="username"
+            class="w-full px-4 py-2.5 bg-bg border border-border rounded-lg text-white placeholder-gray-600 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all duration-200"
+            data-i18n-placeholder="username" placeholder="用户名">
+        </div>
+        <div>
+          <label for="login-pass" class="block text-xs font-medium text-gray-400 mb-1.5" data-i18n="password">密码</label>
+          <input type="password" id="login-pass" required autocomplete="current-password"
+            class="w-full px-4 py-2.5 bg-bg border border-border rounded-lg text-white placeholder-gray-600 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all duration-200"
+            data-i18n-placeholder="password" placeholder="密码">
+        </div>
+        <div id="login-error" class="hidden bg-red-500/10 border border-red-500/20 rounded-lg p-3 flex items-center gap-2 text-red-400 text-sm" role="alert">
+          <svg class="w-4 h-4 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20" aria-hidden="true"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"/></svg>
+          <span id="login-error-text"></span>
+        </div>
+        <button type="submit"
+          class="w-full py-2.5 bg-indigo-500 text-white font-semibold rounded-lg text-sm hover:bg-indigo-600 active:scale-[0.98] focus:outline-none focus:ring-2 focus:ring-indigo-400 focus:ring-offset-2 focus:ring-offset-surface transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
+          data-i18n="login">登录</button>
+      </form>
+    </div>
+    <p class="text-center text-xs text-gray-600 mt-6">Secured by Xi-Rang Engine v2.0</p>
+  </div>
+  </div>
+</div>
+
+<!-- 主界面 -->
+<div id="app" class="page">
+  <nav class="flex justify-between items-center px-6 py-3 bg-surface/80 backdrop-blur-lg border-b border-border sticky top-0 z-50 shadow-md" role="navigation" aria-label="Main navigation">
+    <div class="flex items-center gap-3">
+      <span class="text-lg font-bold text-white" data-i18n="appName">息壤</span>
+      <label for="portfolio-select" class="sr-only" data-i18n="selectStrategy">选择策略</label>
+      <select id="portfolio-select" aria-label="Portfolio selector"
+        class="px-3 py-1.5 bg-bg border border-border rounded-lg text-sm text-gray-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all duration-200"></select>
+    </div>
+    <div class="flex items-center gap-3">
+      <div class="inline-flex gap-1 bg-white/5 rounded-lg p-1">
+        <button class="lang-btn px-3 py-1 rounded-md text-xs font-semibold transition-all duration-200 hover:bg-white/10 text-gray-400" data-lang="zh" onclick="setLang('zh');refreshUI()" aria-pressed="false">中</button>
+        <button class="lang-btn px-3 py-1 rounded-md text-xs font-semibold transition-all duration-200 hover:bg-white/10 text-gray-400" data-lang="en" onclick="setLang('en');refreshUI()" aria-pressed="false">EN</button>
+      </div>
+      <span id="user-display" class="text-dim text-sm"></span>
+      <button id="btn-logout" class="px-3 py-1.5 text-sm text-red-400 hover:text-red-300 hover:bg-red-900/20 rounded-lg transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-red-400" data-i18n="logout">退出</button>
+    </div>
+  </nav>
+
+  <!-- 选项卡 -->
+  <div class="tabs" role="tablist" aria-label="Main tabs">
+    <button class="tab active" data-tab="dashboard" data-i18n="tabDashboard" role="tab" aria-selected="true">仪表盘</button>
+    <button class="tab" data-tab="withdrawals" data-i18n="tabFunds" role="tab" aria-selected="false">资金管理</button>
+    <button class="tab" data-tab="report" data-i18n="tabReport" role="tab" aria-selected="false">家族月报</button>
+    <div class="tab-more-wrapper">
+      <button class="tab-more-btn" id="btn-tab-more" aria-haspopup="true" aria-expanded="false">⋯</button>
+      <div class="tab-more-dropdown" id="tab-more-dropdown" role="menu">
+        <button class="tab-dropdown-item" data-tab="transactions" data-i18n="tabTransactions" role="menuitem">调仓历史</button>
+        <button class="tab-dropdown-item" data-tab="alpha" data-i18n="tabAlpha" role="menuitem">达尔文沙盒</button>
+        <button class="tab-dropdown-item" data-tab="datastatus" data-i18n="tabDataStatus" role="menuitem">数据状态</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 仪表盘 -->
+  <div id="tab-dashboard" class="tab-content active" role="tabpanel">
+    <div class="stats-row">
+      <div class="stat-card" role="status">
+        <div class="stat-label" data-i18n="netAsset">净资产</div>
+        <div class="stat-value" id="stat-nav">
+          <div class="skeleton h-8 w-32"></div>
+        </div>
+      </div>
+      <div class="stat-card" role="status">
+        <div class="stat-label" data-i18n="status">状态</div>
+        <div class="stat-value" id="stat-state">
+          <div class="skeleton h-6 w-20"></div>
+        </div>
+      </div>
+      <div class="stat-card" role="status">
+        <div class="stat-label" data-i18n="currentDrawdown">当前回撤</div>
+        <div class="stat-value" id="stat-drawdown">
+          <div class="skeleton h-8 w-24"></div>
+        </div>
+      </div>
+    </div>
+    <div class="charts-row">
+      <div class="chart-box">
+        <h3 data-i18n="navTrend">净资产走势</h3>
+        <div id="chart-nav-skeleton" class="skeleton h-28 w-full rounded-lg"></div>
+        <canvas id="chart-nav" role="img" aria-label="NAV trend chart" style="display:none;max-height:112px"></canvas>
+      </div>
+      <div class="chart-box chart-small">
+        <h3 data-i18n="assetAllocation">资产配置</h3>
+        <div id="chart-weights-skeleton" class="skeleton h-28 w-full rounded-lg"></div>
+        <canvas id="chart-weights" role="img" aria-label="Asset allocation chart" style="display:none;max-height:112px"></canvas>
+      </div>
+    </div>
+    <div class="charts-row">
+      <div class="chart-box">
+        <h3 data-i18n="drawdownMonitor">回撤监控</h3>
+        <div id="chart-dd-skeleton" class="skeleton h-28 w-full rounded-lg"></div>
+        <canvas id="chart-drawdown" role="img" aria-label="Drawdown monitor chart" style="display:none;max-height:112px"></canvas>
+      </div>
+      <div class="chart-box chart-small">
+        <h3 data-i18n="riskEvents">风控事件</h3>
+        <div id="risk-events-list" class="event-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 资金管理（入金+出金）-->
+  <div id="tab-withdrawals" class="tab-content" role="tabpanel">
+    <!-- 子选项卡 -->
+    <div class="funds-subtabs" role="tablist" aria-label="Funds sub tabs">
+      <button class="funds-subtab active" data-ftab="deposit" role="tab" aria-selected="true" data-i18n="depositSection">入金</button>
+      <button class="funds-subtab" data-ftab="withdraw" role="tab" aria-selected="false" data-i18n="withdrawalSection">出金</button>
+      <button class="funds-subtab" data-ftab="history" role="tab" aria-selected="false" data-i18n="depositHistory">入金记录</button>
+    </div>
+
+    <!-- 入金面板 -->
+    <div id="ftab-deposit" class="funds-panel active">
+      <div class="section-header">
+        <h3 data-i18n="depositSection">入金</h3>
+      </div>
+      <!-- 三层状态概览 -->
+      <div id="layer-status-bar" class="layer-status-bar"></div>
+      <!-- 入金表单 -->
+      <div id="deposit-form-box" class="form-box">
+        <form id="deposit-form" novalidate>
+          <label for="d-amount" data-i18n="depositAmount">入金金额</label>
+          <div class="input-with-unit">
+            <span class="input-unit">$</span>
+            <input type="number" id="d-amount" min="100" step="0.01" required aria-required="true" placeholder="10,000">
+          </div>
+          <div class="form-actions">
+            <button type="submit" class="btn-primary" id="btn-deposit-preview" data-i18n="depositPreview">预览分配方案</button>
+          </div>
+        </form>
+      </div>
+      <!-- 预览结果 -->
+      <div id="deposit-preview-box" class="preview-box" hidden>
+        <h4 data-i18n="depositPreviewTitle">入金分配方案</h4>
+        <div id="deposit-preview-content"></div>
+        <div class="preview-actions">
+          <button id="btn-deposit-confirm" class="btn-primary" data-i18n="depositConfirm">确认入金</button>
+          <button id="btn-deposit-cancel" class="btn-sm" data-i18n="cancel">取消</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 出金面板 -->
+    <div id="ftab-withdraw" class="funds-panel">
+      <div class="section-header">
+        <h3 data-i18n="withdrawalSection">出金</h3>
+        <button id="btn-new-withdraw" class="btn-primary" hidden data-i18n="newWithdrawal" aria-label="New withdrawal">发起出金</button>
+      </div>
+      <!-- 出金表单 -->
+      <div id="withdraw-form-box" class="form-box" hidden>
+        <form id="withdraw-form" novalidate>
+          <label for="w-amount" data-i18n="amountUSD">金额 (USD)</label>
+          <input type="number" id="w-amount" min="1" step="0.01" required aria-required="true">
+          <label for="w-reason" data-i18n="reason">原因</label>
+          <textarea id="w-reason" rows="2" required aria-required="true"></textarea>
+          <div class="form-actions">
+            <button type="button" id="btn-withdraw-preview" class="btn-primary" data-i18n="withdrawPreview">预览扣减方案</button>
+            <button type="button" id="btn-cancel-withdraw" class="btn-sm" data-i18n="cancel">取消</button>
+          </div>
+        </form>
+      </div>
+      <!-- 出金预览 -->
+      <div id="withdraw-preview-box" class="preview-box" hidden>
+        <h4 data-i18n="withdrawPreviewTitle">出金扣减方案</h4>
+        <div id="withdraw-preview-content"></div>
+        <div class="preview-actions">
+          <button id="btn-withdraw-submit" class="btn-primary" data-i18n="submit">提交出金请求</button>
+          <button id="btn-withdraw-preview-cancel" class="btn-sm" data-i18n="cancel">取消</button>
+        </div>
+      </div>
+      <!-- 出金列表 -->
+      <table id="withdrawals-table" aria-label="Withdrawal records">
+        <caption class="sr-only" data-i18n="withdrawalMgmt">出金管理</caption>
+        <thead>
+          <tr>
+            <th data-i18n="thId">ID</th><th data-i18n="thAmount">金额</th><th data-i18n="thReason">原因</th><th data-i18n="thRequester">发起人</th><th data-i18n="thStatus">状态</th><th data-i18n="thApproval">审批</th><th data-i18n="thAction">操作</th>
+          </tr>
+        </thead>
+        <tbody id="withdrawals-body"></tbody>
+      </table>
+    </div>
+
+    <!-- 入金记录面板 -->
+    <div id="ftab-history" class="funds-panel">
+      <div class="section-header">
+        <h3 data-i18n="depositHistory">入金记录</h3>
+      </div>
+      <table id="deposits-table" aria-label="Deposit records">
+        <caption class="sr-only" data-i18n="depositHistory">入金记录</caption>
+        <thead>
+          <tr>
+            <th data-i18n="thId">ID</th><th data-i18n="thAmount">金额</th><th>Depositor</th><th>Allocation</th><th data-i18n="thDate">日期</th>
+          </tr>
+        </thead>
+        <tbody id="deposits-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- 调仓历史 -->
+  <div id="tab-transactions" class="tab-content" role="tabpanel">
+    <h3 data-i18n="rebalanceHistory">调仓历史</h3>
+    <table id="transactions-table" aria-label="Rebalance history">
+      <caption class="sr-only" data-i18n="rebalanceHistory">调仓历史</caption>
+      <thead>
+        <tr>
+          <th data-i18n="thDate">日期</th><th data-i18n="thType">类型</th><th data-i18n="thTurnover">换手率</th><th data-i18n="thFriction">摩擦成本</th><th data-i18n="thReason">原因</th>
+        </tr>
+      </thead>
+      <tbody id="transactions-body"></tbody>
+    </table>
+  </div>
+
+  <!-- 达尔文沙盒 -->
+  <div id="tab-alpha" class="tab-content" role="tabpanel">
+    <div class="section-header">
+      <h3 data-i18n="alphaTitle">达尔文沙盒 — Alpha 策略竞技场</h3>
+    </div>
+    <div id="arena-controls" class="flex gap-2 mb-4" hidden>
+      <button id="btn-arena-run-all" class="btn-primary" data-i18n="runAll" aria-label="Run all strategies">运行所有策略</button>
+      <button id="btn-arena-evaluate" class="btn-sm" data-i18n="quarterlyEval" aria-label="Quarterly evaluation">季度评估</button>
+    </div>
+    <div id="alpha-strategies"></div>
+    <div id="arena-leaderboard" class="mt-6">
+      <h3 data-i18n="leaderboard">策略排行榜</h3>
+      <table aria-label="Strategy leaderboard">
+        <caption class="sr-only" data-i18n="leaderboard">策略排行榜</caption>
+        <thead>
+          <tr>
+            <th data-i18n="thRank">#</th><th data-i18n="thStrategy">策略</th><th data-i18n="thStatus">状态</th><th data-i18n="thSharpe">夏普</th><th data-i18n="thAnnualReturn">年化收益</th><th data-i18n="thMaxDrawdown">最大回撤</th><th data-i18n="thWinRate">胜率</th><th data-i18n="thTradeCount">交易次数</th><th data-i18n="thTotalPnl">总损益</th>
+          </tr>
+        </thead>
+        <tbody id="arena-board-body"></tbody>
+      </table>
+    </div>
+    <div id="alpha-transactions" class="mt-5">
+      <div class="flex items-center gap-3 mb-2">
+        <h3 class="m-0" data-i18n="strategyTxTitle">策略交易记录</h3>
+        <label for="alpha-tx-strategy" class="sr-only" data-i18n="selectStrategy">选择策略</label>
+        <select id="alpha-tx-strategy" aria-label="Select strategy" class="bg-surface text-gray-200 border border-border rounded-lg px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all duration-200"></select>
+      </div>
+      <table aria-label="Strategy transactions">
+        <caption class="sr-only" data-i18n="strategyTxTitle">策略交易记录</caption>
+        <thead>
+          <tr>
+            <th data-i18n="thDate">日期</th><th data-i18n="thActionCol">动作</th><th data-i18n="thUnderlying">标的</th><th data-i18n="thStrike">价格/行权价</th><th data-i18n="thExpiry">到期/数量</th><th data-i18n="thContracts">合约/股数</th><th data-i18n="thIncome">收入</th><th data-i18n="thTotalPnl">损益</th><th data-i18n="thDetail">详情</th>
+          </tr>
+        </thead>
+        <tbody id="alpha-tx-body"></tbody>
+      </table>
+    </div>
+    <div id="eval-result" class="mt-4" hidden>
+      <h3 data-i18n="evalResultTitle">季度评估结果</h3>
+      <pre id="eval-report" class="bg-surface p-4 rounded-lg text-sm overflow-x-auto whitespace-pre-wrap"></pre>
+    </div>
+  </div>
+
+  <!-- 家族月报 -->
+  <div id="tab-report" class="tab-content" role="tabpanel">
+    <div class="section-header">
+      <h3 data-i18n="monthlyReport">家族月报</h3>
+      <button id="btn-gen-report" class="btn-primary" data-i18n="generateReport" aria-label="Generate report">生成最新报告</button>
+    </div>
+    <div id="report-calendar" class="mb-5"></div>
+    <div id="report-portfolio-bar" class="report-bar mb-3 gap-2 items-center" style="display:none">
+      <button id="btn-report-back" class="btn-sm" aria-label="Go back">← <span data-i18n="reportBack">返回</span></button>
+      <span id="report-month-label" class="font-semibold mx-4"></span>
+      <div id="report-portfolio-tabs" class="flex gap-1.5"></div>
+    </div>
+    <iframe id="report-frame" title="Monthly report content" class="w-full border border-border rounded-lg bg-bg" style="min-height:600px;display:none;" src="about:blank"></iframe>
+  </div>
+
+  <!-- 数据状态 -->
+  <div id="tab-datastatus" class="tab-content" role="tabpanel">
+    <div class="section-header">
+      <h3 data-i18n="dataStatusTitle">数据新鲜度监控</h3>
+      <div class="flex gap-2 items-center">
+        <span id="data-checked-at" class="text-dim"></span>
+        <button id="btn-update-live" class="btn-sm" data-i18n="dataUpdateLive" aria-label="Update live data">更新 Live</button>
+        <button id="btn-update-all" class="btn-primary" data-i18n="dataUpdateAll" aria-label="Update all data">更新全部数据</button>
+      </div>
+    </div>
+    <p class="text-dim mb-4" data-i18n="dataStatusDesc">所有 Ticker 的本地数据状态，陈旧数据可能导致决策偏差</p>
+
+    <div id="scheduler-status-box" class="data-task-box mb-4" hidden>
+      <div class="data-task-header">
+        <span id="scheduler-status-text" class="text-sm"></span>
+      </div>
+    </div>
+
+    <div id="data-task-box" class="data-task-box" hidden>
+      <div class="data-task-header">
+        <span id="data-task-status"></span>
+        <div class="flex gap-2">
+          <button id="btn-toggle-logs" class="btn-sm" data-i18n="dataViewLogs" aria-label="Toggle logs">查看日志</button>
+          <button id="btn-dismiss-task" class="btn-sm" hidden aria-label="Dismiss">✕</button>
+        </div>
+      </div>
+      <div id="data-task-progress" class="data-task-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100">
+        <div id="data-task-bar" class="data-task-bar"></div>
+      </div>
+      <div id="data-task-lastlog" class="text-dim text-xs mt-1"></div>
+      <pre id="data-task-logs" class="data-task-logs" hidden></pre>
+    </div>
+
+    <div class="data-section">
+      <h4 data-i18n="dataMarketFiles">市场数据文件</h4>
+      <div class="data-grid" id="data-markets"></div>
+    </div>
+    <div class="data-section">
+      <h4 data-i18n="dataLiveFiles">Live 数据</h4>
+      <div class="data-grid" id="data-live"></div>
+    </div>
+    <div class="data-section">
+      <h4 data-i18n="dataRawTickers">原始 Ticker 缓存</h4>
+      <table class="data-table" aria-label="Raw ticker cache">
+        <caption class="sr-only" data-i18n="dataRawTickers">原始 Ticker 缓存</caption>
+        <thead>
+          <tr>
+            <th data-i18n="dataTickerCol">标的</th>
+            <th data-i18n="dataRowsCol">数据行数</th>
+            <th data-i18n="dataRangeCol">日期范围</th>
+            <th data-i18n="dataStaleDaysCol">陈旧天数</th>
+            <th data-i18n="dataLevelCol">状态</th>
+            <th data-i18n="thAction">操作</th>
+          </tr>
+        </thead>
+        <tbody id="data-tickers-body"></tbody>
+      </table>
+    </div>
+    <p class="text-dim mt-4 text-xs" data-i18n="dataUpdateHint">运行 python -m data.data_manager --update 更新数据</p>
+  </div>
+
+  <!-- 审批弹窗 -->
+  <div id="modal-overlay" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <div class="modal">
+      <h3 id="modal-title"><span data-i18n="approvalTitle">审批出金请求</span> <span id="modal-wid"></span></h3>
+      <p id="modal-detail"></p>
+      <label for="modal-comment" class="sr-only" data-i18n="commentPlaceholder">备注</label>
+      <textarea id="modal-comment" data-i18n-placeholder="commentPlaceholder" placeholder="备注（可选）" rows="2"></textarea>
+      <div class="modal-actions">
+        <button id="btn-approve" class="btn-primary" data-i18n="approve" aria-label="Approve withdrawal">批准</button>
+        <button id="btn-reject" class="btn-danger" data-i18n="reject" aria-label="Reject withdrawal">拒绝</button>
+        <button id="btn-modal-close" class="btn-sm" data-i18n="cancel" aria-label="Close dialog">取消</button>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- 登录提醒弹窗（防败家子）— 独立于 #app，避免 display:none 遮挡 -->
+<div id="wisdom-overlay" class="wisdom-overlay" role="dialog" aria-modal="true" aria-labelledby="wisdom-title">
+  <div class="wisdom-modal">
+    <div class="wisdom-icon" role="img" aria-label="Shield">🛡️</div>
+    <h2 id="wisdom-title" class="wisdom-title"></h2>
+    <p id="wisdom-body" class="wisdom-body"></p>
+    <div class="wisdom-footer">
+      <p id="wisdom-countdown" class="wisdom-countdown" aria-live="polite"></p>
+      <button id="btn-wisdom-confirm" class="btn-primary wisdom-btn" disabled aria-label="Confirm reading">
+        <span data-i18n="wisdomConfirm">我已阅读并谨记</span>
+      </button>
+    </div>
+  </div>
+</div>
+
+<script src="/static/i18n.js"></script>
+<script src="/static/wisdom.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

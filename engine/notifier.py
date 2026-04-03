@@ -190,3 +190,98 @@ def notify(report: dict) -> bool:
         logger.info("未配置任何推送渠道，仅控制台输出")
 
     return True
+
+
+# ── 出金治理通知 ──────────────────────────────────────
+
+
+def format_withdrawal_message(
+    withdrawal_id: str, amount: float, reason: str,
+    requester: str, portfolio_id: str,
+    cooling_days: int, expires_at: str,
+) -> str:
+    """大额出金请求通知"""
+    return (
+        f"💰 息壤 · 出金审批通知\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"请求编号: #{withdrawal_id}\n"
+        f"金额: ${amount:,.2f}\n"
+        f"原因: {reason}\n"
+        f"发起人: {requester}\n"
+        f"组合: {portfolio_id}\n"
+        f"冷却期: {cooling_days} 天\n"
+        f"过期时间: {expires_at}\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"请登录 Web 面板审批此请求"
+    )
+
+
+def format_approval_message(
+    withdrawal_id: str, amount: float, approver: str, decision: str,
+) -> str:
+    """审批结果通知"""
+    icon = "✅" if decision == "APPROVED" else "❌"
+    status_cn = "已批准" if decision == "APPROVED" else "已拒绝"
+    return (
+        f"{icon} 息壤 · 出金{status_cn}\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"请求编号: #{withdrawal_id}\n"
+        f"金额: ${amount:,.2f}\n"
+        f"审批人: {approver}\n"
+        f"结果: {status_cn}"
+    )
+
+
+def format_monthly_report_message(report: dict) -> str:
+    """月报摘要通知"""
+    portfolios = report.get("portfolios", [])
+    lines = [
+        f"📊 息壤 · 家族月报",
+        f"━━━━━━━━━━━━━━━",
+        f"报告期: {report.get('period', '')}",
+        "",
+    ]
+    for p in portfolios:
+        lines.append(f"  {p['name']}: {p['currency']}{p['nav']:,.2f}")
+        lines.append(f"    本月: {p['monthly_return']:+.2%} | 回撤: {p['drawdown']:.2%}")
+    lines.append(f"\n详见 Web 面板或附件报告")
+    return "\n".join(lines)
+
+
+def _broadcast(message: str) -> bool:
+    """广播通知到所有渠道"""
+    print(f"\n{'─'*40}")
+    print(message)
+    print(f"{'─'*40}\n")
+
+    sent = False
+    for name, sender in CHANNELS:
+        try:
+            if sender(message):
+                logger.info(f"✓ {name} 推送成功")
+                sent = True
+        except Exception as e:
+            logger.error(f"✗ {name} 推送失败: {e}")
+
+    return sent
+
+
+def notify_withdrawal(**kwargs) -> bool:
+    """出金请求通知"""
+    message = format_withdrawal_message(**kwargs)
+    logger.info(f"发送出金审批通知 #{kwargs.get('withdrawal_id')}")
+    return _broadcast(message)
+
+
+def notify_approval(withdrawal_id: str, amount: float, approver: str, decision: str) -> bool:
+    """审批结果通知"""
+    message = format_approval_message(withdrawal_id, amount, approver, decision)
+    logger.info(f"发送审批结果通知 #{withdrawal_id}: {decision}")
+    return _broadcast(message)
+
+
+def notify_monthly_report(report: dict) -> bool:
+    """月报通知"""
+    message = format_monthly_report_message(report)
+    logger.info("发送家族月报通知")
+    return _broadcast(message)

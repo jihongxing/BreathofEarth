@@ -1,11 +1,16 @@
 -- 息壤（Xi-Rang）SQLite 数据库 Schema
 
 -- 组合状态
+-- positions = Core 层四资产持仓（永久组合，不可破坏）
+-- stability_balance = Stability 层独立资金池（缓冲入金、出金来源）
+-- Alpha 层由 alpha_strategies 表独立管理
+-- nav = Core positions 总和 + stability_balance（不含 Alpha）
 CREATE TABLE IF NOT EXISTS portfolios (
     id TEXT PRIMARY KEY DEFAULT 'default',
     state TEXT NOT NULL DEFAULT 'IDLE',
     nav REAL NOT NULL DEFAULT 100000.0,
     positions TEXT NOT NULL DEFAULT '[25000,25000,25000,25000]',
+    stability_balance REAL NOT NULL DEFAULT 0.0,
     high_water_mark REAL NOT NULL DEFAULT 100000.0,
     cooldown_counter INTEGER NOT NULL DEFAULT 0,
     rebalance_count INTEGER NOT NULL DEFAULT 0,

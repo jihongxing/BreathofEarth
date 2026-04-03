@@ -48,7 +48,18 @@ ASSET_NAMES = {
     "SHV": "短期国债/现金",
 }
 
-# ── 权重配置（所有组合共享）──────────────────────────
+# ── 三层资产结构占比 ──────────────────────────────────
+# Core（抗通胀层）：永久组合，内部等权，不可破坏
+# Stability（流动性层）：独立资金池，缓冲入金、出金来源
+# Alpha（增长层）：由 alpha_strategies 独立管理，此处仅定义占比上限
+
+LAYER_TARGET_CORE = 0.80          # Core 层目标占比
+LAYER_TARGET_STABILITY = 0.15     # Stability 层目标占比
+LAYER_TARGET_ALPHA = 0.05         # Alpha 层目标占比（上限）
+LAYER_MIN_STABILITY = 0.05        # Stability 层最低安全线（低于触发风控）
+LAYER_MAX_STABILITY = 0.30        # Stability 层上限（超过应转入 Core）
+
+# ── 权重配置（Core 层内部，所有组合共享）─────────────
 
 # 正常模式：等权永久组合
 WEIGHTS_IDLE = [0.25, 0.25, 0.25, 0.25]
@@ -79,3 +90,76 @@ COOLDOWN_DAYS = 20
 
 STATE_IDLE = "IDLE"
 STATE_PROTECTION = "PROTECTION"
+
+
+# ── 配置校验 ──────────────────────────────────────────
+
+
+def validate_config():
+    """
+    校验配置参数的合理性。
+
+    在系统启动时调用，确保所有参数符合预期。
+
+    Raises:
+        AssertionError 如果配置不合理
+    """
+    # 权重配置校验
+    assert len(WEIGHTS_IDLE) == 4, f"WEIGHTS_IDLE 必须有 4 个元素，当前: {len(WEIGHTS_IDLE)}"
+    assert len(WEIGHTS_PROTECT) == 4, f"WEIGHTS_PROTECT 必须有 4 个元素，当前: {len(WEIGHTS_PROTECT)}"
+    assert len(WEIGHTS_EMERGENCY) == 4, f"WEIGHTS_EMERGENCY 必须有 4 个元素，当前: {len(WEIGHTS_EMERGENCY)}"
+
+    assert abs(sum(WEIGHTS_IDLE) - 1.0) < 1e-6, f"WEIGHTS_IDLE 权重和必须为 1.0，当前: {sum(WEIGHTS_IDLE)}"
+    assert abs(sum(WEIGHTS_PROTECT) - 1.0) < 1e-6, f"WEIGHTS_PROTECT 权重和必须为 1.0，当前: {sum(WEIGHTS_PROTECT)}"
+    assert abs(sum(WEIGHTS_EMERGENCY) - 1.0) < 1e-6, f"WEIGHTS_EMERGENCY 权重和必须为 1.0，当前: {sum(WEIGHTS_EMERGENCY)}"
+
+    assert all(0 <= w <= 1 for w in WEIGHTS_IDLE), "WEIGHTS_IDLE 所有权重必须在 [0, 1] 范围内"
+    assert all(0 <= w <= 1 for w in WEIGHTS_PROTECT), "WEIGHTS_PROTECT 所有权重必须在 [0, 1] 范围内"
+    assert all(0 <= w <= 1 for w in WEIGHTS_EMERGENCY), "WEIGHTS_EMERGENCY 所有权重必须在 [0, 1] 范围内"
+
+    # 风控阈值校验
+    assert HARD_STOP_DD < RISK_DD_THRESHOLD < 0, \
+        f"风控阈值必须满足: HARD_STOP_DD ({HARD_STOP_DD}) < RISK_DD_THRESHOLD ({RISK_DD_THRESHOLD}) < 0"
+
+    assert -0.20 <= HARD_STOP_DD <= -0.10, \
+        f"HARD_STOP_DD 应在 [-20%, -10%] 范围内，当前: {HARD_STOP_DD:.2%}"
+
+    assert -0.15 <= RISK_DD_THRESHOLD <= -0.05, \
+        f"RISK_DD_THRESHOLD 应在 [-15%, -5%] 范围内，当前: {RISK_DD_THRESHOLD:.2%}"
+
+    assert 0 < RISK_CORR_THRESHOLD < 1, \
+        f"RISK_CORR_THRESHOLD 必须在 (0, 1) 范围内，当前: {RISK_CORR_THRESHOLD}"
+
+    assert 10 <= CORR_WINDOW <= 60, \
+        f"CORR_WINDOW 应在 [10, 60] 天范围内，当前: {CORR_WINDOW}"
+
+    # 再平衡参数校验
+    assert 0 < DRIFT_THRESHOLD < 0.2, \
+        f"DRIFT_THRESHOLD 应在 (0, 0.2) 范围内，当前: {DRIFT_THRESHOLD}"
+
+    assert 0 <= FEE_RATE < 0.01, \
+        f"FEE_RATE 应在 [0, 0.01) 范围内，当前: {FEE_RATE}"
+
+    # 冷却期校验
+    assert 5 <= COOLDOWN_DAYS <= 60, \
+        f"COOLDOWN_DAYS 应在 [5, 60] 天范围内，当前: {COOLDOWN_DAYS}"
+
+    # 组合配置校验
+    assert len(PORTFOLIOS) > 0, "至少需要定义一个组合"
+
+    for pid, pf in PORTFOLIOS.items():
+        assert "name" in pf, f"组合 {pid} 缺少 name 字段"
+        assert "currency" in pf, f"组合 {pid} 缺少 currency 字段"
+        assert "assets" in pf, f"组合 {pid} 缺少 assets 字段"
+        assert "asset_names" in pf, f"组合 {pid} 缺少 asset_names 字段"
+
+        assets = pf["assets"]
+        assert len(assets) == 4, f"组合 {pid} 必须有 4 个资产，当前: {len(assets)}"
+        assert len(assets) == len(set(assets)), f"组合 {pid} 资产列表有重复: {assets}"
+
+        asset_names = pf["asset_names"]
+        for asset in assets:
+            assert asset in asset_names, f"组合 {pid} 的资产 {asset} 在 asset_names 中未定义"
+
+    assert DEFAULT_PORTFOLIO in PORTFOLIOS, \
+        f"DEFAULT_PORTFOLIO '{DEFAULT_PORTFOLIO}' 不在 PORTFOLIOS 中"

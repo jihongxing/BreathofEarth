@@ -1,0 +1,92 @@
+{
+  "generated_at_utc": "2026-04-03T21:49:33.182498",
+  "source": "data_manager_v2",
+  "policy": {
+    "backtest_mode": "local_only"
+  },
+  "tickers": {
+    "EZU": {
+      "rows": 5344,
+      "start": "2005-01-03",
+      "end": "2026-04-02",
+      "sha256": "c2340bc7043596caa44122fb014746e45dc346219c4817b69441133ae06a3aa5"
+    },
+    "BWX": {
+      "rows": 4647,
+      "start": "2007-10-11",
+      "end": "2026-04-02",
+      "sha256": "edcf84f92d9f7992446ab183835aae47083718c606f8ebe1dee14d18860eaf20"
+    },
+    "GLD": {
+      "rows": 5346,
+      "start": "2005-01-03",
+      "end": "2026-04-02",
+      "sha256": "ba971b43ae9cad91cacc4a84bebd900106fa684072863551ba97da0870400ecc"
+    },
+    "SHV": {
+      "rows": 5346,
+      "start": "2005-01-03",
+      "end": "2026-04-02",
+      "sha256": "cf673bc19e38a9e7eced8f22b38cc628b28a807457eeddb0e5499034a9bb37b8"
+    },
+    "EPI": {
+      "rows": 4554,
+      "start": "2008-02-26",
+      "end": "2026-04-02",
+      "sha256": "4d17403ecc8bbe7966ec71b6685e13a5dc068400cd3085d5bbe2f265a1e10b72"
+    },
+    "EMB": {
+      "rows": 2176,
+      "start": "2017-08-07",
+      "end": "2026-04-02",
+      "sha256": "7366dbf04852dedab7889ab991c3d3d3b04b1238d49e9303dce54395f63b232d"
+    },
+    "VT": {
+      "rows": 4469,
+      "start": "2008-06-26",
+      "end": "2026-04-02",
+      "sha256": "e5bf427a55743fb5f9df3ecec197c5bf0d17d6cbaafc615c3b743a8d1409da4a"
+    }
+  },
+  "markets": {
+    "eu": {
+      "file": "D:/codeSpace/BreathofEarth/data/market_eu.csv",
+      "rows": 4648,
+      "columns": [
+        "EZU",
+        "BWX",
+        "GLD",
+        "SHV"
+      ],
+      "start": "2007-10-11",
+      "end": "2026-04-02",
+      "sha256": "a041ca6499189ab03192f68c4909c9cae4e276ba29d17672d7b15ea9fd2eec90"
+    },
+    "india": {
+      "file": "D:/codeSpace/BreathofEarth/data/market_india.csv",
+      "rows": 2176,
+      "columns": [
+        "EPI",
+        "EMB",
+        "GLD",
+        "SHV"
+      ],
+      "start": "2017-08-07",
+      "end": "2026-04-02",
+      "sha256": "d72e5c107cc3bce5aa1f9c5044e5a2c3c13770b1e54764c2ed70988bd8c03c1d"
+    },
+    "global": {
+      "file": "D:/codeSpace/BreathofEarth/data/market_global.csv",
+      "rows": 4470,
+      "columns": [
+        "VT",
+        "BWX",
+        "GLD",
+        "SHV"
+      ],
+      "start": "2008-06-26",
+      "end": "2026-04-02",
+      "sha256": "4313721735579863e40275814a86c587b9b91c670398f4a794125226c8215adb"
+    }
+  }
+}

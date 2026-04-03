@@ -20,18 +20,34 @@ from engine.execution.base import BaseExecutor
 from engine.execution.paper import PaperExecutor
 from engine.execution.manual import ManualExecutor
 from engine.execution.broker import BrokerExecutor, IBKRAdapter, FutuAdapter
+from engine.execution.twap import TWAPExecutor
 
 logger = logging.getLogger("xirang.execution")
 
 
-def create_executor(market_data_service=None) -> BaseExecutor:
+def create_executor(market_data_service=None, use_twap: bool = False) -> BaseExecutor:
     """
     根据环境变量创建执行器。
+
+    Args:
+        market_data_service: 市场数据服务
+        use_twap: 是否使用 TWAP 执行器（大额订单自动拆单）
 
     Returns:
         对应阶段的执行器实例
     """
     mode = os.environ.get("XIRANG_EXECUTOR", "paper").lower()
+
+    # 如果启用 TWAP，优先返回 TWAP 执行器
+    if use_twap and mode == "paper":
+        logger.info("执行模式: Paper Trading + TWAP（智能拆单）")
+        return TWAPExecutor(
+            market_data_service=market_data_service,
+            time_window_minutes=120,
+            num_slices=20,
+            min_order_size=500000.0,  # $500k 以上触发 TWAP
+            simulate=True,
+        )
 
     if mode == "paper":
         logger.info("执行模式: Paper Trading（仿真）")

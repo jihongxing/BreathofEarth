@@ -13,7 +13,6 @@
 import json
 import shutil
 import logging
-import time
 import sys
 import numpy as np
 from datetime import datetime
@@ -25,6 +24,7 @@ from engine.portfolio import PortfolioEngine
 from engine.market_data import MarketDataService
 from engine.data_validator import validate_prices, validate_returns, DataValidationError
 from engine.notifier import notify
+from engine.tax_optimizer import TaxLossHarvester
 from db.database import Database
 
 LOG_DIR = Path("logs")
@@ -39,9 +39,6 @@ logging.basicConfig(
     ],
 )
 logger = logging.getLogger("xirang.runner")
-
-MAX_RETRIES = 3
-RETRY_DELAY = 60
 
 
 class DailyRunner:
@@ -84,21 +81,14 @@ class DailyRunner:
         # 拉取数据
         market = MarketDataService(assets=assets, data_source=pf_config.get("data_source"))
         prices = None
-        for attempt in range(1, MAX_RETRIES + 1):
-            try:
-                logger.info(f"  拉取数据 (尝试 {attempt}/{MAX_RETRIES})...")
-                prices = market.fetch_latest(lookback_days=60)
-                break
-            except Exception as e:
-                logger.warning(f"  数据拉取失败: {e}")
-                if attempt < MAX_RETRIES:
-                    logger.info(f"  等待 {RETRY_DELAY} 秒后重试...")
-                    time.sleep(RETRY_DELAY)
-                else:
-                    msg = f"数据拉取连续 {MAX_RETRIES} 次失败: {e}"
-                    logger.error(f"  {msg}")
-                    self.db.record_run(today, "FAILED", msg, portfolio_id)
-                    return {"date": today, "portfolio": portfolio_id, "status": "FAILED", "reason": msg}
+        try:
+            logger.info(f"  拉取数据...")
+            prices = market.fetch_latest(lookback_days=60)
+        except Exception as e:
+            msg = f"数据拉取失败: {e}"
+            logger.error(f"  {msg}")
+            self.db.record_run(today, "FAILED", msg, portfolio_id)
+            return {"date": today, "portfolio": portfolio_id, "status": "FAILED", "reason": msg}
 
         # 数据校验
         try:
@@ -143,43 +133,37 @@ class DailyRunner:
             is_year_end=(now.month == 12 and now.day >= 28),
         )
 
-        # 持久化
-        self.db.update_portfolio(
-            portfolio_id=portfolio_id,
-            state=engine.state, nav=engine.nav,
-            positions=json.dumps(engine.positions.tolist()),
-            high_water_mark=risk.high_water_mark,
-            cooldown_counter=engine.cooldown_counter,
-            rebalance_count=engine.rebalance_count,
-            protection_count=engine.protection_count,
-        )
-        self.db.save_snapshot(
-            date=today, state=engine.state, nav=engine.nav,
-            positions=engine.positions.tolist(),
-            weights=engine.weights.tolist(),
-            drawdown=risk_signal.current_dd,
-            spy_tlt_corr=indicators["spy_tlt_corr"],
-            action=order.reason if order else None,
-            trigger_reason=risk_signal.trigger_reason,
-            portfolio_id=portfolio_id,
-        )
-        if order:
-            self.db.save_transaction(
-                date=today, tx_type="REBALANCE",
-                target_weights=order.target_weights,
-                turnover=order.turnover, friction_cost=order.friction_cost,
-                reason=order.reason, portfolio_id=portfolio_id,
-            )
-        if risk_signal.trigger_reason:
-            sev = "HIGH" if risk_signal.is_hard_stop else "MEDIUM" if risk_signal.is_protection else "LOW"
-            self.db.save_risk_event(
-                date=today, event_type=risk_signal.trigger_reason.split(":")[0].strip(),
-                severity=sev, drawdown=risk_signal.current_dd,
-                spy_tlt_corr=risk_signal.spy_tlt_corr,
-                action_taken=order.reason if order else "无操作",
+        # 年末税务优化（仅美股账户，12月执行）
+        tax_harvest_result = None
+        if portfolio_id == "us" and now.month == 12:
+            logger.info(f"  执行年末税务优化...")
+            harvester = TaxLossHarvester(self.db, min_loss_pct=0.05)
+
+            # 获取当前价格
+            current_prices = {asset: float(prices[asset].iloc[-1]) for asset in assets}
+
+            # 执行税损收割
+            tax_harvest_result = harvester.run_year_end_harvest(
                 portfolio_id=portfolio_id,
+                current_prices=current_prices,
+                current_date=today,
             )
 
+            if tax_harvest_result.total_loss_harvested > 0:
+                logger.info(
+                    f"  ✓ 税损收割: {len(tax_harvest_result.harvested_positions)} 个持仓, "
+                    f"收割 ${tax_harvest_result.total_loss_harvested:,.2f}, "
+                    f"预估节税 ${tax_harvest_result.estimated_tax_saved:,.2f}"
+                )
+            else:
+                logger.info(f"  ✓ 税务优化: {tax_harvest_result.message}")
+
+            # 检查并换回已过 Wash Sale 期的收割
+            reversed_count = harvester.check_and_reverse_harvests(today, portfolio_id)
+            if reversed_count > 0:
+                logger.info(f"  ✓ 换回税损收割: {reversed_count} 个")
+
+        # 构建报告
         report = {
             "date": today, "portfolio": portfolio_id, "name": name,
             "state": engine.state,
@@ -191,7 +175,61 @@ class DailyRunner:
             "rebalance_count": engine.rebalance_count,
             "protection_count": engine.protection_count,
         }
-        self.db.record_run(today, "SUCCESS", json.dumps(report), portfolio_id)
+
+        # 添加税务优化信息
+        if tax_harvest_result:
+            report["tax_harvest"] = {
+                "harvested_count": len(tax_harvest_result.harvested_positions),
+                "total_loss": round(tax_harvest_result.total_loss_harvested, 2),
+                "estimated_tax_saved": round(tax_harvest_result.estimated_tax_saved, 2),
+            }
+
+        # 持久化（使用事务确保原子性）
+        try:
+            with self.db.transaction() as conn:
+                self.db.update_portfolio(
+                    portfolio_id=portfolio_id,
+                    state=engine.state, nav=engine.nav,
+                    positions=json.dumps(engine.positions.tolist()),
+                    high_water_mark=risk.high_water_mark,
+                    cooldown_counter=engine.cooldown_counter,
+                    rebalance_count=engine.rebalance_count,
+                    protection_count=engine.protection_count,
+                    conn=conn,
+                )
+                self.db.save_snapshot(
+                    date=today, state=engine.state, nav=engine.nav,
+                    positions=engine.positions.tolist(),
+                    weights=engine.weights.tolist(),
+                    drawdown=risk_signal.current_dd,
+                    spy_tlt_corr=indicators["spy_tlt_corr"],
+                    action=order.reason if order else None,
+                    trigger_reason=risk_signal.trigger_reason,
+                    portfolio_id=portfolio_id,
+                    conn=conn,
+                )
+                if order:
+                    self.db.save_transaction(
+                        date=today, tx_type="REBALANCE",
+                        target_weights=order.target_weights,
+                        turnover=order.turnover, friction_cost=order.friction_cost,
+                        reason=order.reason, portfolio_id=portfolio_id,
+                        conn=conn,
+                    )
+                if risk_signal.trigger_reason:
+                    sev = "HIGH" if risk_signal.is_hard_stop else "MEDIUM" if risk_signal.is_protection else "LOW"
+                    self.db.save_risk_event(
+                        date=today, event_type=risk_signal.trigger_reason.split(":")[0].strip(),
+                        severity=sev, drawdown=risk_signal.current_dd,
+                        spy_tlt_corr=risk_signal.spy_tlt_corr,
+                        action_taken=order.reason if order else "无操作",
+                        portfolio_id=portfolio_id,
+                        conn=conn,
+                    )
+                self.db.record_run(today, "SUCCESS", json.dumps(report), portfolio_id, conn=conn)
+        except Exception as e:
+            logger.error(f"  数据库事务失败: {e}")
+            return {"date": today, "portfolio": portfolio_id, "status": "FAILED", "reason": f"数据库错误: {e}"}
 
         logger.info(f"  NAV: {currency}{report['nav']:,.2f} | {report['state']}")
         if order:

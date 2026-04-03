@@ -6,3 +6,5 @@ numpy>=1.24
 matplotlib>=3.7
 fastapi>=0.110
 uvicorn>=0.29
+PyJWT>=2.8
+python-multipart>=0.0.9

@@ -1,15 +1,17 @@
 """
 息壤（Xi-Rang）市场数据服务
 
-双数据源 + 多市场支持：
-- yfinance: 美股 ETF（优先）
-- akshare: 美股 ETF 后备 + 中国 A 股 ETF
-- 货币基金(MONEY): 年化 2% 模拟
+数据加载策略（v2 - 本地优先，零限流）：
+1. 优先读取本地 CSV（live_us.csv / live_cn.csv）
+2. 本地没数据时，通过 DataManager 增量更新（带统一限流保护）
+3. 永不直接裸调 API，所有网络请求都经过 DataManager
+
+回测数据：直接使用 DataManager.load_local()，100% 不联网。
 """
 
 import os
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -20,7 +22,10 @@ from engine.config import ASSETS, CORR_WINDOW
 
 logger = logging.getLogger("xirang.market_data")
 
-AKSHARE_US_SYMBOLS = {"SPY": "SPY", "TLT": "TLT", "GLD": "GLD", "SHV": "SHV"}
+
+class DataFetchError(Exception):
+    """数据拉取失败"""
+    pass
 
 
 class MarketDataService:
@@ -32,32 +37,38 @@ class MarketDataService:
         self._cache: Optional[pd.DataFrame] = None
 
     def fetch_latest(self, lookback_days: int = 60) -> pd.DataFrame:
-        source = self.data_source or os.environ.get("XIRANG_DATA_SOURCE", "").lower()
+        """
+        获取最新市场数据。
 
-        # 优先从本地 CSV 读取（服务器模式）
-        if source == "local" or source == "":
-            try:
-                return self._fetch_local_csv()
-            except Exception as e:
-                logger.warning(f"本地 CSV 读取失败: {e}，尝试在线数据源...")
-
-        if source == "akshare":
-            return self._fetch_akshare_us(lookback_days)
-        elif source == "akshare_cn":
-            return self._fetch_akshare_cn(lookback_days)
-
-        # 中国标的自动用 akshare_cn
-        if any(t.endswith(".SS") or t.endswith(".SZ") or t == "MONEY" for t in self.assets):
-            try:
-                return self._fetch_local_csv()
-            except Exception:
-                return self._fetch_akshare_cn(lookback_days)
-
+        策略（v2）：
+        1. 总是先尝试本地 CSV（零 API 调用）
+        2. 只有本地没数据时，才���过 DataManager 增量更新
+        3. DataManager 内部有统一限流，确保不被封
+        """
+        # 第一步：尝试本地 CSV
         try:
-            return self._fetch_yfinance(lookback_days)
+            return self._fetch_local_csv()
         except Exception as e:
-            logger.warning(f"yfinance 失败: {e}，切换 akshare...")
-            return self._fetch_akshare_us(lookback_days)
+            logger.warning(f"本地 CSV 读取失败: {e}")
+
+        # 第二步：通过 DataManager 增量更新（带限流保护）
+        logger.info("通过 DataManager 增量更新数据...")
+        try:
+            from data.data_manager import DataManager
+            dm = DataManager(min_interval=2.0)
+
+            is_cn = any(t.endswith(".SS") or t.endswith(".SZ") or t == "MONEY" for t in self.assets)
+            if is_cn:
+                dm.update_live()
+                return self._fetch_local_csv()
+            else:
+                dm.update_live()
+                return self._fetch_local_csv()
+        except Exception as e2:
+            raise DataFetchError(
+                f"数据获取失败（本地和在线均失败）: {e2}\n"
+                f"请先在本地运行: python -m data.data_manager --update-live"
+            )
 
     def _fetch_local_csv(self) -> pd.DataFrame:
         """
@@ -101,96 +112,6 @@ class MarketDataService:
         prices.index.name = "date"
         self._cache = prices
         logger.info(f"数据源: 本地 CSV ({csv_path.name}, {len(prices)} 行)")
-        return prices
-
-    def _fetch_yfinance(self, lookback_days):
-        import yfinance as yf
-        end = datetime.now()
-        start = end - timedelta(days=lookback_days + 10)
-        frames = {}
-        for ticker in self.assets:
-            df = yf.download(ticker, start=start, end=end, auto_adjust=False, progress=False)
-            if df.empty:
-                raise RuntimeError(f"无法获取 {ticker}")
-            if isinstance(df.columns, pd.MultiIndex):
-                adj = df["Adj Close"]
-                if isinstance(adj, pd.DataFrame): adj = adj.iloc[:, 0]
-            else:
-                adj = df["Adj Close"]
-            frames[ticker] = adj
-        prices = pd.DataFrame(frames).ffill().bfill()
-        prices.index.name = "date"
-        self._cache = prices
-        logger.info("数据源: yfinance")
-        return prices
-
-    def _fetch_akshare_us(self, lookback_days):
-        try:
-            import akshare as ak
-        except ImportError:
-            raise RuntimeError("akshare 未安装: pip3 install akshare")
-        end = datetime.now()
-        start = end - timedelta(days=lookback_days + 10)
-        s, e = start.strftime("%Y%m%d"), end.strftime("%Y%m%d")
-        frames = {}
-        for ticker in self.assets:
-            sym = AKSHARE_US_SYMBOLS.get(ticker, ticker)
-            df = ak.stock_us_daily(symbol=sym, adjust="qfq")
-            if df.empty: raise RuntimeError(f"akshare 无 {ticker}")
-            df["date"] = pd.to_datetime(df["date"])
-            df = df.set_index("date").sort_index()[s:e]
-            frames[ticker] = df["close"]
-            logger.info(f"  akshare_us {ticker}: {len(df)} 条")
-        prices = pd.DataFrame(frames).ffill().bfill()
-        prices.index.name = "date"
-        self._cache = prices
-        logger.info("数据源: akshare (美股)")
-        return prices
-
-    def _fetch_akshare_cn(self, lookback_days):
-        try:
-            import akshare as ak
-        except ImportError:
-            raise RuntimeError("akshare 未安装: pip3 install akshare")
-        end = datetime.now()
-        start = end - timedelta(days=lookback_days + 10)
-        s, e = start.strftime("%Y%m%d"), end.strftime("%Y%m%d")
-        frames = {}
-        for ticker in self.assets:
-            if ticker == "MONEY": continue
-            code = ticker.replace(".SS", "").replace(".SZ", "")
-            try:
-                df = ak.fund_etf_hist_em(symbol=code, period="daily",
-                                         start_date=s, end_date=e, adjust="qfq")
-                if df.empty: raise RuntimeError(f"无数据")
-                df["日期"] = pd.to_datetime(df["日期"])
-                df = df.set_index("日期").sort_index()
-                frames[ticker] = df["收盘"].astype(float)
-                logger.info(f"  akshare_cn {ticker}: {len(df)} 条")
-            except Exception as ex:
-                logger.warning(f"  akshare_cn {ticker} 失败，尝试 yfinance...")
-                import yfinance as yf
-                ydf = yf.download(ticker, start=start, end=end, auto_adjust=False, progress=False)
-                if ydf.empty: raise RuntimeError(f"{ticker} 所有数据源失败")
-                if isinstance(ydf.columns, pd.MultiIndex):
-                    adj = ydf["Adj Close"]
-                    if isinstance(adj, pd.DataFrame): adj = adj.iloc[:, 0]
-                else:
-                    adj = ydf["Adj Close"]
-                frames[ticker] = adj
-                logger.info(f"  yfinance {ticker}: {len(adj)} 条 (备用)")
-        prices = pd.DataFrame(frames).ffill().bfill()
-        if "MONEY" in self.assets:
-            daily_rate = (1.02 ** (1/252)) - 1
-            money = pd.Series(index=prices.index, dtype=float)
-            money.iloc[0] = 100.0
-            for j in range(1, len(money)):
-                money.iloc[j] = money.iloc[j-1] * (1 + daily_rate)
-            prices["MONEY"] = money
-        prices = prices.dropna()
-        prices.index.name = "date"
-        self._cache = prices
-        logger.info("数据源: akshare (A股)")
         return prices
 
     def get_daily_returns(self, prices=None):
