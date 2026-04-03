@@ -200,12 +200,18 @@ python data/data_loader.py
 # 跑一次回测验证
 python -m backtest.engine_backtest
 
-# 启动每日运行（首次）
+# 启动 Web 服务（仪表盘 + API）
+python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+# 浏览器访问 http://localhost:8000
+
+# 或仅运行每日调仓（无需 Web）
 python -m runner.daily_runner
 
 # 查看报告
 python -m runner.report
 ```
+
+Web 服务启动后，所有前端资源（Chart.js、CSS）均为本地文件，零外部 CDN 依赖，断网可用。
 
 ## 部署到服务器
 
@@ -268,12 +274,44 @@ xi-rang/
 │   ├── market_data.py       #   行情服务（Yahoo Finance）
 │   ├── data_validator.py    #   数据校验（Fail-safe）
 │   ├── notifier.py          #   通知推送（Telegram/微信/飞书/钉钉）
+│   ├── governance.py        #   出金治理（多签 + 冷却期）
+│   ├── tax_optimizer.py     #   税损收割优化器
+│   ├── cashflow.py          #   现金流管理
+│   ├── alpha/               #   Alpha 策略沙盒
+│   │   ├── base.py          #     策略基类
+│   │   ├── arena.py         #     达尔文竞技场
+│   │   ├── momentum.py      #     动量策略
+│   │   ├── grid_trading.py  #     网格策略
+│   │   ├── covered_call.py  #     备兑策略
+│   │   └── registry.py      #     策略注册表
 │   └── execution/           #   执行层（四阶段演进框架）
 │       ├── base.py          #     统一接口
 │       ├── paper.py         #     Phase 1: 仿真（当前）
 │       ├── manual.py        #     Phase 2: 人工执行
+│       ├── twap.py          #     TWAP 智能拆单引擎
 │       ├── broker.py        #     Phase 3/4: 券商 API
 │       └── factory.py       #     工厂（环境变量切换）
+├── api/                     # RESTful API 层
+│   ├── auth.py              #   JWT 认证（admin/member/viewer）
+│   ├── deps.py              #   依赖注入
+│   ├── models.py            #   请求/响应模型
+│   └── routes/              #   路由模块
+│       ├── auth_routes.py   #     登录/注册
+│       ├── dashboard_routes.py #  仪表盘数据
+│       ├── portfolio_routes.py #  组合查询
+│       ├── governance_routes.py # 出金审批
+│       ├── admin_routes.py  #     管理操作
+│       ├── alpha_routes.py  #     Alpha 沙盒
+│       ├── data_routes.py   #     数据状态
+│       └── report_routes.py #     月报生成
+├── frontend/                # Web 前端（纯静态，零外部依赖）
+│   ├── index.html           #   单页应用
+│   ├── app.js               #   业务逻辑
+│   ├── style.css            #   自定义样式
+│   ├── tailwind-local.css   #   Tailwind 工具类（本地替代）
+│   ├── chart.min.js         #   Chart.js v4.4.7（本地）
+│   ├── i18n.js              #   中英双语
+│   └── wisdom.js            #   名言模块
 ├── backtest/                # 回测
 │   ├── simple_backtest.py   #   Phase 1: 纯被动永久组合
 │   ├── stateful_backtest.py #   Phase 2: 带风控状态机
@@ -285,14 +323,22 @@ xi-rang/
 │   └── global_backtest.py   #   全球配置(VT)回测
 ├── runner/                  # 运行器
 │   ├── daily_runner.py      #   每日运行（cron 驱动）
+│   ├── dashboard.py         #   终端仪表盘
 │   └── report.py            #   汇总报告 V2.0
 ├── data/                    # 市场数据
-│   └── data_loader.py       #   数据拉取与清洗
+│   ├── data_loader.py       #   数据拉取与清洗
+│   ├── data_manager.py      #   多源数据管理（akshare/yfinance，本地缓存优先）
+│   ├── scheduler.py         #   自动更新调度器
+│   └── raw/                 #   原始行情缓存（CSV）
 ├── db/                      # 数据库
-│   ├── schema.sql           #   表结构
+│   ├── schema.sql           #   核心表结构
+│   ├── schema_governance.sql#   出金治理表
+│   ├── schema_alpha.sql     #   Alpha 沙盒表
+│   ├── schema_tax_harvest.sql#  税损收割表
 │   └── database.py          #   SQLite 封装
+├── tests/                   # 测试
 ├── docs/                    # 文档
-├── main.py                  # FastAPI 服务（可选）
+├── main.py                  # FastAPI 服务入口
 └── requirements.txt
 ```
 
@@ -326,10 +372,12 @@ Phase 4: 全自动（只在风控触发时通知）
 
 - Python 3.12+
 - SQLite（零运维）
-- FastAPI（可选 API 服务）
-- yfinance（行情数据）
+- FastAPI + Uvicorn（Web 服务）
+- yfinance / akshare（行情数据，多源冗余）
 - pandas / numpy（计算）
 - matplotlib（回测图表）
+- Chart.js（前端图表，本地打包）
+- 纯原生 HTML/CSS/JS 前端（零构建、零 CDN）
 
 ## 许可
 

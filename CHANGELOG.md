@@ -2,6 +2,68 @@
 
 所有重要变更记录在此。格式遵循 [Keep a Changelog](https://keepachangelog.com/)。
 
+## [0.4.0] - 2026-04-04
+
+### Web 前端 & API 服务
+
+- 新增完整 Web UI（单页应用）
+  - 仪表盘：净资产、收益率、回撤、持仓分布图表
+  - 资金管理：出金申请 + 多签审批流程
+  - 家族月报：在线查看 + PDF 导出
+  - 调仓历史、达尔文沙盒、数据状态页
+  - 中英双语切换（i18n.js）
+  - 登录页 + JWT 认证（admin / member / viewer 三级权限）
+- 新增 RESTful API 层（`api/routes/`）
+  - 8 个路由模块：auth / dashboard / portfolio / governance / admin / alpha / data / report
+  - JWT 认证中间件、依赖注入、请求模型
+- 前端零外部依赖
+  - Chart.js CDN → 本地 `chart.min.js`
+  - Tailwind CSS CDN → 本地 `tailwind-local.css`（纯 CSS 手写替代）
+  - favicon 用 data URI 内联，无额外请求
+  - 断网环境完全可用
+
+### 数据管理
+
+- 新增 `data/data_manager.py` 多源数据管理器
+  - 优先 akshare（新浪/东财），fallback yfinance
+  - 本地 CSV 缓存优先，增量更新，限流保护
+  - 支持中国 A 股 ETF + 美股 + 全球市场
+- 新增 `data/scheduler.py` 自动更新调度器
+  - 每天 18:00 Live 更新，每周六 10:00 全量更新
+  - 启动时自动检查数据新鲜度
+  - 随 FastAPI lifespan 启停
+
+### Alpha 策略沙盒
+
+- 新增 `engine/alpha/` 达尔文竞技场
+  - `arena.py`: 策略擂台，自动回测 + 排名
+  - `momentum.py`: 动量策略
+  - `grid_trading.py`: 网格策略
+  - `covered_call.py`: 备兑看涨策略
+  - `registry.py`: 策略注册表
+
+### 治理与风控
+
+- 新增 `engine/governance.py` 出金治理模块
+  - 大额出金多签审批 + 冷却期
+  - 审计日志追踪
+- 新增 `engine/tax_optimizer.py` 税损收割优化器
+- 新增 `engine/cashflow.py` 现金流管理
+- 新增 `engine/execution/twap.py` TWAP 智能拆单引擎
+
+### 测试
+
+- 新增单元测试覆盖（`tests/`）
+  - test_portfolio_engine / test_risk_engine / test_data_validator
+  - test_alpha_arena / test_tax_optimizer / test_tax_harvest_integration
+  - test_twap_executor / test_twap_backtest
+
+### 其他
+
+- `.gitignore` 新增 `.ai/` `.claude/` `.kiro/` 排除规则
+- 新增 `runner/dashboard.py` 终端仪表盘
+- 新增多市场数据文件（market_cn/eu/india/global/chimerica.csv）
+
 ## [0.3.0] - 2026-03-30
 
 ### 执行层框架
