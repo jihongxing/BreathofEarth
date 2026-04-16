@@ -36,7 +36,7 @@ def fetch_and_save():
     print(f"息壤数据拉取 - {today}")
     print("=" * 50)
 
-    dm = DataManager(min_interval=2.0, max_hourly=100)
+    dm = DataManager(min_interval=5.0, max_hourly=30)
     try:
         dm.update_live()
         print(f"\n✓ 数据拉取完成")
@@ -51,17 +51,27 @@ def git_push():
     print("\n推送到 GitHub...")
     try:
         subprocess.run(
-            ["git", "add", "data/live_us.csv", "data/live_cn.csv", "data/last_update.txt"],
-            check=True, capture_output=True,
+            [
+                "git",
+                "add",
+                "data/live_us.csv",
+                "data/live_cn.csv",
+                "data/last_update.txt",
+            ],
+            check=True,
+            capture_output=True,
         )
-        result = subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True)
+        result = subprocess.run(
+            ["git", "status", "--porcelain"], capture_output=True, text=True
+        )
         if not result.stdout.strip():
             print("  无变更，跳过推送")
             return
         today = datetime.now().strftime("%Y-%m-%d")
         subprocess.run(
             ["git", "commit", "-m", f"data: 每日行情更新 {today}"],
-            check=True, capture_output=True,
+            check=True,
+            capture_output=True,
         )
         subprocess.run(["git", "push"], check=True, capture_output=True)
         print("  ✓ 推送成功")

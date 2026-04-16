@@ -25,6 +25,7 @@ logger = logging.getLogger("xirang.governance")
 
 MULTISIG_THRESHOLD = 500_000.0   # 50 万以上需多签
 REQUIRED_APPROVALS = 2           # 需要 2 人批准
+SMALL_WITHDRAWAL_APPROVALS = 1   # 小额出金也必须有人审批
 COOLING_DAYS = 7                 # 冷却期天数
 REQUEST_EXPIRY_DAYS = 14         # 请求过期天数
 
@@ -55,12 +56,14 @@ class WithdrawalGovernance:
         """
         发起出金请求。
 
-        < 50万：自动批准
-        >= 50万：进入多签流程 + 7天冷却期 + 通知家族成员
+        所有出金都只创建请求，不自动批准。
+        < 50万：单人审批，无冷却期
+        >= 50万：多人审批 + 7天冷却期
         """
         withdrawal_id = str(uuid.uuid4())[:8]
         needs_multisig = amount >= MULTISIG_THRESHOLD
         cooling = COOLING_DAYS if needs_multisig else 0
+        required_approvals = REQUIRED_APPROVALS if needs_multisig else SMALL_WITHDRAWAL_APPROVALS
         expires_at = (datetime.now() + timedelta(days=cooling + REQUEST_EXPIRY_DAYS)).strftime("%Y-%m-%d")
 
         self.db.create_withdrawal_request(
@@ -70,7 +73,7 @@ class WithdrawalGovernance:
             requester=requester,
             expires_at=expires_at,
             portfolio_id=portfolio_id,
-            required_approvals=REQUIRED_APPROVALS if needs_multisig else 0,
+            required_approvals=required_approvals,
             cooling_days=cooling,
         )
 
@@ -79,17 +82,11 @@ class WithdrawalGovernance:
             f"发起出金 ${amount:,.2f}，组合: {portfolio_id}，原因: {reason}",
         )
 
-        if not needs_multisig:
-            self.db.update_withdrawal_status(withdrawal_id, "APPROVED")
-            logger.info(f"小额出金 ${amount:,.2f} 自动批准 (#{withdrawal_id})")
-            return GovernanceResult(
-                status="APPROVED",
-                withdrawal_id=withdrawal_id,
-                message=f"小额出金（< ${MULTISIG_THRESHOLD:,.0f}），已自动批准",
-            )
+        if needs_multisig:
+            logger.info(f"大额出金 ${amount:,.2f} 需要多签 (#{withdrawal_id})")
+        else:
+            logger.info(f"小额出金 ${amount:,.2f} 已创建待审批请求 (#{withdrawal_id})")
 
-        # 大额：通知家族成员
-        logger.info(f"大额出金 ${amount:,.2f} 需要多签 (#{withdrawal_id})")
         notify_withdrawal(
             withdrawal_id=withdrawal_id,
             amount=amount,
@@ -103,8 +100,8 @@ class WithdrawalGovernance:
         return GovernanceResult(
             status="PENDING",
             withdrawal_id=withdrawal_id,
-            message=f"大额出金需要 {REQUIRED_APPROVALS} 位家族成员批准，冷却期 {cooling} 天",
-            required_approvals=REQUIRED_APPROVALS,
+            message=f"出金请求已创建，需要 {required_approvals} 位家族成员批准" + (f"，冷却期 {cooling} 天" if cooling else ""),
+            required_approvals=required_approvals,
             cooling_days=cooling,
             expires_at=expires_at,
         )

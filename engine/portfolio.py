@@ -66,6 +66,7 @@ class PortfolioEngine:
         self.state = STATE_IDLE
         self.cooldown_counter = 0
         self.nav = initial_capital
+        self.stability_balance = 0.0
         self.positions = np.array(WEIGHTS_IDLE, dtype=float) * initial_capital
         self.rebalance_count = 0
         self.protection_count = 0
@@ -73,7 +74,67 @@ class PortfolioEngine:
 
     @property
     def weights(self) -> np.ndarray:
-        return self.positions / self.nav if self.nav > 0 else np.zeros(len(ASSETS))
+        core_nav = self.core_nav
+        return self.positions / core_nav if core_nav > 0 else np.zeros(len(ASSETS))
+
+    @property
+    def core_nav(self) -> float:
+        return float(np.sum(self.positions))
+
+    def refresh_nav(self):
+        self.nav = self.core_nav + float(self.stability_balance)
+
+    def apply_daily_returns(self, daily_returns: np.ndarray):
+        """仅让 Core 层自然生长，Stability 保持不变。"""
+        self.positions = self.positions * (1 + daily_returns)
+        self.refresh_nav()
+
+    def evaluate_rebalance(
+        self,
+        risk_signal: RiskSignal,
+        is_year_end: bool = False,
+    ) -> Optional[RebalanceOrder]:
+        """基于当前状态评估是否需要再平衡。"""
+        if self.state == STATE_IDLE:
+            return self._handle_idle(risk_signal, is_year_end)
+        if self.state == STATE_PROTECTION:
+            return self._handle_protection(risk_signal)
+        return None
+
+    def apply_rebalance(
+        self,
+        order: RebalanceOrder,
+        actual_friction_cost: Optional[float] = None,
+    ):
+        """
+        执行再平衡。
+
+        如果执行层返回了真实手续费/滑点成本，则优先使用执行结果，
+        否则退回到状态机内部估算值。
+        """
+        friction_cost = order.friction_cost if actual_friction_cost is None else actual_friction_cost
+        core_after_cost = max(self.core_nav - friction_cost, 0.0)
+        self.positions = np.array(order.target_weights) * core_after_cost
+        self.refresh_nav()
+        self.rebalance_count += 1
+
+    def record_snapshot(
+        self,
+        current_date: date,
+        risk_signal: RiskSignal,
+        action: Optional[str] = None,
+    ):
+        """记录当前组合快照。"""
+        self.snapshots.append(PortfolioSnapshot(
+            date=str(current_date),
+            state=self.state,
+            nav=self.nav,
+            positions=self.positions.tolist(),
+            weights=self.weights.tolist(),
+            drawdown=risk_signal.current_dd,
+            action=action,
+            trigger_reason=risk_signal.trigger_reason,
+        ))
 
     def step(
         self,
@@ -94,35 +155,15 @@ class PortfolioEngine:
         Returns:
             RebalanceOrder 如果执行了再平衡，否则 None
         """
-        # 1. 资产自然生长
-        self.positions = self.positions * (1 + daily_returns)
-        self.nav = float(np.sum(self.positions))
+        self.apply_daily_returns(daily_returns)
+        order = self.evaluate_rebalance(risk_signal, is_year_end)
 
-        order = None
         action = None
-
-        # 2. 状态机逻辑
-        if self.state == STATE_IDLE:
-            order = self._handle_idle(risk_signal, is_year_end)
-        elif self.state == STATE_PROTECTION:
-            order = self._handle_protection(risk_signal)
-
-        # 3. 执行再平衡指令
         if order is not None:
-            self._execute_rebalance(order)
+            self.apply_rebalance(order)
             action = order.reason
 
-        # 4. 记录快照
-        self.snapshots.append(PortfolioSnapshot(
-            date=str(current_date),
-            state=self.state,
-            nav=self.nav,
-            positions=self.positions.tolist(),
-            weights=self.weights.tolist(),
-            drawdown=risk_signal.current_dd,
-            action=action,
-            trigger_reason=risk_signal.trigger_reason,
-        ))
+        self.record_snapshot(current_date, risk_signal, action=action)
 
         return order
 
@@ -177,16 +218,10 @@ class PortfolioEngine:
         """生成再平衡指令"""
         target = np.array(target_weights)
         turnover = float(np.sum(np.abs(self.weights - target)) / 2)
-        friction_cost = self.nav * turnover * FEE_RATE
+        friction_cost = self.core_nav * turnover * FEE_RATE
         return RebalanceOrder(
             target_weights=target_weights,
             turnover=turnover,
             friction_cost=friction_cost,
             reason=reason,
         )
-
-    def _execute_rebalance(self, order: RebalanceOrder):
-        """执行再平衡：扣除摩擦成本，重置持仓"""
-        self.nav -= order.friction_cost
-        self.positions = np.array(order.target_weights) * self.nav
-        self.rebalance_count += 1

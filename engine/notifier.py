@@ -50,6 +50,28 @@ def format_rebalance_message(report: dict) -> str:
     )
 
 
+def format_execution_alert(report: dict) -> str:
+    """执行异常告警。"""
+    execution = report.get("execution", {})
+    manual_reasons = report.get("manual_intervention_reasons") or []
+    detail = (
+        (manual_reasons[0].get("message") if manual_reasons else None)
+        or execution.get("message")
+        or report.get("action")
+        or "未知异常"
+    )
+    return (
+        f"⚠️ 息壤 · 执行异常\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"日期: {report['date']}\n"
+        f"状态: {report.get('run_status', 'UNKNOWN')}\n"
+        f"组合: {report.get('name', report.get('portfolio', '-'))}\n"
+        f"原因: {detail}\n"
+        f"NAV: ${report['nav']:,.2f}\n"
+        f"系统已保持原持仓，等待异常处理"
+    )
+
+
 def format_protection_message(report: dict) -> str:
     """风控警报通知"""
     weights = report.get("weights", {})
@@ -77,16 +99,19 @@ def format_message(report: dict) -> Optional[str]:
         格式化的消息字符串，如果不需要通知则返回 None
     """
     action = report.get("action")
+    run_status = report.get("run_status")
 
-    # 没有动作 = 静默，不发通知
-    if action is None:
-        return None
+    if run_status in ("FAILED_EXECUTION", "PENDING_EXECUTION", "MANUAL_INTERVENTION_REQUIRED"):
+        return format_execution_alert(report)
 
     state = report.get("state", "IDLE")
-    if state == "PROTECTION":
+    if action is None:
+        return None
+    if state == "PROTECTION" or ("保护" in str(action)) or ("避险" in str(action)):
         return format_protection_message(report)
-    else:
-        return format_rebalance_message(report)
+
+    # 普通阈值再平衡/年末再平衡保持静默，避免把用户拉进交易节奏。
+    return None
 
 
 # ── 发送渠道 ──────────────────────────────────────────

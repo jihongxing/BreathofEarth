@@ -23,8 +23,6 @@ from engine.execution.base import (
     OrderSide, OrderStatus,
 )
 from engine.execution.paper import PaperExecutor
-from engine.config import ASSETS
-from engine.notifier import notify
 
 
 class ManualExecutor(BaseExecutor):
@@ -35,8 +33,8 @@ class ManualExecutor(BaseExecutor):
     但 execute 阶段改为推送指令而非直接"成交"。
     """
 
-    def __init__(self, market_data_service=None):
-        self._paper = PaperExecutor(market_data_service)
+    def __init__(self, market_data_service=None, assets=None):
+        self._paper = PaperExecutor(market_data_service, assets=assets)
         self.market = market_data_service
 
     def translate_orders(

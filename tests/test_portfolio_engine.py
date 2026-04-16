@@ -70,6 +70,7 @@ class TestPortfolioEngine:
         """初始状态：IDLE，等权配置"""
         assert self.engine.state == STATE_IDLE
         assert self.engine.nav == 100000.0
+        assert self.engine.core_nav == 100000.0
         assert self.engine.cooldown_counter == 0
         assert self.engine.rebalance_count == 0
         assert self.engine.protection_count == 0
@@ -284,6 +285,31 @@ class TestPortfolioEngine:
 
         weights = self.engine.weights
         np.testing.assert_array_almost_equal(weights, [0.25, 0.25, 0.25, 0.25])
+
+    def test_stability_is_included_in_total_nav_but_not_core_weights(self):
+        """Stability 应计入总 NAV，但不改变 Core 内部权重。"""
+        self.engine.positions = np.array([25000, 25000, 25000, 25000], dtype=float)
+        self.engine.stability_balance = 20000.0
+        self.engine.refresh_nav()
+
+        assert self.engine.core_nav == pytest.approx(100000.0)
+        assert self.engine.nav == pytest.approx(120000.0)
+        np.testing.assert_array_almost_equal(self.engine.weights, [0.25, 0.25, 0.25, 0.25])
+
+    def test_rebalance_friction_only_hits_core_not_stability(self):
+        """再平衡摩擦成本只能扣 Core，不应侵蚀 Stability 余额。"""
+        self.engine.positions = np.array([32000, 25000, 25000, 18000], dtype=float)
+        self.engine.stability_balance = 15000.0
+        self.engine.refresh_nav()
+
+        order = self.engine.evaluate_rebalance(self._make_signal(), is_year_end=False)
+        assert order is not None
+
+        self.engine.apply_rebalance(order, actual_friction_cost=100.0)
+
+        assert self.engine.stability_balance == pytest.approx(15000.0)
+        assert self.engine.core_nav == pytest.approx(99900.0)
+        assert self.engine.nav == pytest.approx(114900.0)
 
     def test_rebalance_count_increments(self):
         """再平衡计数递增"""

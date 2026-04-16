@@ -20,6 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from db.database import Database
+from engine.config import validate_config
 from api.routes.auth_routes import router as auth_router
 from api.routes.portfolio_routes import router as portfolio_router
 from api.routes.dashboard_routes import router as dashboard_router
@@ -32,6 +33,7 @@ from api.routes.report_routes import router as report_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    validate_config()
     db = Database()
     app.state.db = db
 

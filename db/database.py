@@ -41,6 +41,154 @@ class Database:
             # 加载 Alpha 沙盒扩展表
             if SCHEMA_ALPHA_PATH.exists():
                 conn.executescript(SCHEMA_ALPHA_PATH.read_text(encoding="utf-8"))
+                self._migrate_alpha_schema(conn)
+
+    def _table_exists(self, conn, table_name: str) -> bool:
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table_name,),
+        ).fetchone()
+        return row is not None
+
+    def _table_columns(self, conn, table_name: str) -> list[dict]:
+        rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        return [dict(r) for r in rows]
+
+    def _migrate_alpha_schema(self, conn):
+        """将旧版 Alpha 表迁移到按 portfolio_id 隔离的新结构。"""
+        if self._table_exists(conn, "alpha_accounts"):
+            account_cols = {c["name"] for c in self._table_columns(conn, "alpha_accounts")}
+            if "cash_balance" not in account_cols:
+                conn.execute("ALTER TABLE alpha_accounts ADD COLUMN cash_balance REAL NOT NULL DEFAULT 0")
+            if "total_inflows" not in account_cols:
+                conn.execute("ALTER TABLE alpha_accounts ADD COLUMN total_inflows REAL NOT NULL DEFAULT 0")
+            if "total_outflows" not in account_cols:
+                conn.execute("ALTER TABLE alpha_accounts ADD COLUMN total_outflows REAL NOT NULL DEFAULT 0")
+            if "last_manual_adjustment" not in account_cols:
+                conn.execute("ALTER TABLE alpha_accounts ADD COLUMN last_manual_adjustment TEXT")
+
+        if self._table_exists(conn, "alpha_strategies"):
+            strategy_cols = self._table_columns(conn, "alpha_strategies")
+            pk_cols = [c["name"] for c in strategy_cols if c["pk"]]
+            if pk_cols != ["portfolio_id", "id"]:
+                self._rebuild_alpha_strategies(conn)
+
+        if self._table_exists(conn, "alpha_snapshots"):
+            snapshot_cols = {c["name"] for c in self._table_columns(conn, "alpha_snapshots")}
+            if "portfolio_id" not in snapshot_cols:
+                self._rebuild_alpha_snapshots(conn)
+
+    def _rebuild_alpha_strategies(self, conn):
+        """重建 Alpha 策略主表和交易表，按 portfolio_id + strategy_id 作用域隔离。"""
+        if self._table_exists(conn, "alpha_transactions"):
+            conn.execute("ALTER TABLE alpha_transactions RENAME TO alpha_transactions_legacy")
+        conn.execute("ALTER TABLE alpha_strategies RENAME TO alpha_strategies_legacy")
+
+        conn.executescript(
+            """
+            CREATE TABLE alpha_strategies (
+                portfolio_id TEXT NOT NULL DEFAULT 'us',
+                id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                description TEXT,
+                status TEXT NOT NULL DEFAULT 'DISABLED',
+                allocation_pct REAL NOT NULL DEFAULT 0.10,
+                capital REAL NOT NULL DEFAULT 0,
+                total_premium REAL NOT NULL DEFAULT 0,
+                total_pnl REAL NOT NULL DEFAULT 0,
+                trade_count INTEGER NOT NULL DEFAULT 0,
+                enabled_at TEXT,
+                disabled_at TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (portfolio_id, id)
+            );
+
+            CREATE TABLE alpha_transactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                portfolio_id TEXT NOT NULL DEFAULT 'us',
+                strategy_id TEXT NOT NULL,
+                date TEXT NOT NULL,
+                action TEXT NOT NULL,
+                underlying TEXT,
+                strike REAL,
+                expiry TEXT,
+                contracts INTEGER,
+                premium REAL NOT NULL DEFAULT 0,
+                pnl REAL NOT NULL DEFAULT 0,
+                spy_price REAL,
+                detail TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """
+        )
+
+        conn.execute(
+            """
+            INSERT INTO alpha_strategies (
+                portfolio_id, id, name, description, status, allocation_pct, capital,
+                total_premium, total_pnl, trade_count, enabled_at, disabled_at,
+                created_at, updated_at
+            )
+            SELECT
+                COALESCE(portfolio_id, 'us'),
+                id, name, description, status, allocation_pct, capital,
+                total_premium, total_pnl, trade_count, enabled_at, disabled_at,
+                created_at, updated_at
+            FROM alpha_strategies_legacy
+            """
+        )
+
+        if self._table_exists(conn, "alpha_transactions_legacy"):
+            conn.execute(
+                """
+                INSERT INTO alpha_transactions (
+                    id, portfolio_id, strategy_id, date, action, underlying, strike,
+                    expiry, contracts, premium, pnl, spy_price, detail, created_at
+                )
+                SELECT
+                    id, COALESCE(portfolio_id, 'us'), strategy_id, date, action, underlying, strike,
+                    expiry, contracts, premium, pnl, spy_price, detail, created_at
+                FROM alpha_transactions_legacy
+                """
+            )
+            conn.execute("DROP TABLE alpha_transactions_legacy")
+
+        conn.execute("DROP TABLE alpha_strategies_legacy")
+
+    def _rebuild_alpha_snapshots(self, conn):
+        """为 Alpha 快照增加 portfolio_id 作用域。"""
+        conn.execute("ALTER TABLE alpha_snapshots RENAME TO alpha_snapshots_legacy")
+        conn.executescript(
+            """
+            CREATE TABLE alpha_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                portfolio_id TEXT NOT NULL DEFAULT 'us',
+                strategy_id TEXT NOT NULL,
+                date TEXT NOT NULL,
+                capital REAL NOT NULL,
+                nav REAL NOT NULL,
+                daily_return REAL NOT NULL DEFAULT 0,
+                cumulative_return REAL NOT NULL DEFAULT 0,
+                drawdown REAL NOT NULL DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(portfolio_id, strategy_id, date)
+            );
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO alpha_snapshots (
+                id, portfolio_id, strategy_id, date, capital, nav,
+                daily_return, cumulative_return, drawdown, created_at
+            )
+            SELECT
+                id, 'us', strategy_id, date, capital, nav,
+                daily_return, cumulative_return, drawdown, created_at
+            FROM alpha_snapshots_legacy
+            """
+        )
+        conn.execute("DROP TABLE alpha_snapshots_legacy")
 
     @contextmanager
     def _conn(self):
@@ -502,9 +650,265 @@ class Database:
 
     # ── Alpha 沙盒策略 ────────────────────────────────
 
-    def get_strategy(self, strategy_id: str) -> Optional[dict]:
+    def ensure_alpha_account(self, portfolio_id: str = "us"):
         with self._conn() as conn:
-            row = conn.execute("SELECT * FROM alpha_strategies WHERE id = ?", (strategy_id,)).fetchone()
+            conn.execute(
+                "INSERT OR IGNORE INTO alpha_accounts (portfolio_id) VALUES (?)",
+                (portfolio_id,),
+            )
+
+    def get_alpha_account(self, portfolio_id: str = "us") -> dict:
+        self.ensure_alpha_account(portfolio_id)
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM alpha_accounts WHERE portfolio_id = ?",
+                (portfolio_id,),
+            ).fetchone()
+            return dict(row) if row else {
+                "portfolio_id": portfolio_id,
+                "cash_balance": 0.0,
+                "total_inflows": 0.0,
+                "total_outflows": 0.0,
+                "last_manual_adjustment": None,
+            }
+
+    def update_alpha_account(self, portfolio_id: str = "us", conn=None, **kwargs):
+        sets = ", ".join(f"{k} = ?" for k in kwargs)
+        values = list(kwargs.values()) + [portfolio_id]
+        sql = f"UPDATE alpha_accounts SET {sets}, updated_at = CURRENT_TIMESTAMP WHERE portfolio_id = ?"
+
+        if conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO alpha_accounts (portfolio_id) VALUES (?)",
+                (portfolio_id,),
+            )
+            conn.execute(sql, values)
+        else:
+            self.ensure_alpha_account(portfolio_id)
+            with self._conn() as c:
+                c.execute(sql, values)
+
+    def adjust_alpha_account_balance(
+        self,
+        portfolio_id: str,
+        delta: float,
+        note: str = "",
+        conn=None,
+    ) -> dict:
+        if conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO alpha_accounts (portfolio_id) VALUES (?)",
+                (portfolio_id,),
+            )
+            row = conn.execute(
+                "SELECT * FROM alpha_accounts WHERE portfolio_id = ?",
+                (portfolio_id,),
+            ).fetchone()
+            account = dict(row) if row else {
+                "portfolio_id": portfolio_id,
+                "cash_balance": 0.0,
+                "total_inflows": 0.0,
+                "total_outflows": 0.0,
+                "last_manual_adjustment": None,
+            }
+        else:
+            self.ensure_alpha_account(portfolio_id)
+            account = self.get_alpha_account(portfolio_id)
+        new_balance = float(account.get("cash_balance", 0.0)) + delta
+        if new_balance < 0:
+            raise ValueError(f"Alpha 账本余额不足，调整后将为 {new_balance:.2f}")
+
+        inflows = float(account.get("total_inflows", 0.0))
+        outflows = float(account.get("total_outflows", 0.0))
+        if delta >= 0:
+            inflows += delta
+        else:
+            outflows += abs(delta)
+
+        self.update_alpha_account(
+            portfolio_id=portfolio_id,
+            cash_balance=round(new_balance, 2),
+            total_inflows=round(inflows, 2),
+            total_outflows=round(outflows, 2),
+            last_manual_adjustment=note,
+            conn=conn,
+        )
+        if conn:
+            row = conn.execute(
+                "SELECT * FROM alpha_accounts WHERE portfolio_id = ?",
+                (portfolio_id,),
+            ).fetchone()
+            return dict(row) if row else {
+                "portfolio_id": portfolio_id,
+                "cash_balance": round(new_balance, 2),
+                "total_inflows": round(inflows, 2),
+                "total_outflows": round(outflows, 2),
+                "last_manual_adjustment": note,
+            }
+        return self.get_alpha_account(portfolio_id)
+
+    def record_alpha_ledger_entry(
+        self,
+        portfolio_id: str,
+        direction: str,
+        amount: float,
+        actor: str,
+        note: str = "",
+        external_reference: str = "",
+        related_request_id: str = "",
+    ) -> tuple[dict, dict]:
+        direction = direction.upper()
+        if direction not in ("IN", "OUT"):
+            raise ValueError(f"不支持的 Alpha 账本方向: {direction}")
+        if amount <= 0:
+            raise ValueError("记账金额必须大于 0")
+
+        delta = amount if direction == "IN" else -amount
+        entry_note = note or (f"Alpha 人工入账 +{amount:.2f}" if direction == "IN" else f"Alpha 人工出账 -{amount:.2f}")
+
+        with self.transaction() as conn:
+            account = self.adjust_alpha_account_balance(
+                portfolio_id=portfolio_id,
+                delta=delta,
+                note=entry_note,
+                conn=conn,
+            )
+            cursor = conn.execute(
+                """INSERT INTO alpha_ledger_entries
+                   (portfolio_id, direction, amount, balance_after, note,
+                    external_reference, related_request_id, actor)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    portfolio_id,
+                    direction,
+                    round(amount, 2),
+                    round(float(account.get("cash_balance", 0.0)), 2),
+                    entry_note,
+                    external_reference,
+                    related_request_id,
+                    actor,
+                ),
+            )
+            entry_id = cursor.lastrowid
+
+        return self.get_alpha_ledger_entry(entry_id), self.get_alpha_account(portfolio_id)
+
+    def get_alpha_ledger_entry(self, entry_id: int) -> Optional[dict]:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM alpha_ledger_entries WHERE id = ?",
+                (entry_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def list_alpha_ledger_entries(
+        self,
+        portfolio_id: str = "us",
+        direction: Optional[str] = None,
+        limit: int = 20,
+    ) -> list[dict]:
+        with self._conn() as conn:
+            if direction:
+                rows = conn.execute(
+                    """SELECT * FROM alpha_ledger_entries
+                       WHERE portfolio_id = ? AND direction = ?
+                       ORDER BY created_at DESC, id DESC LIMIT ?""",
+                    (portfolio_id, direction.upper(), limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """SELECT * FROM alpha_ledger_entries
+                       WHERE portfolio_id = ?
+                       ORDER BY created_at DESC, id DESC LIMIT ?""",
+                    (portfolio_id, limit),
+                ).fetchall()
+            return [dict(r) for r in rows]
+
+    def create_alpha_withdrawal_request(
+        self,
+        request_id: str,
+        amount: float,
+        reason: str,
+        requester: str,
+        portfolio_id: str = "us",
+        status: str = "PENDING_MANUAL",
+        conn=None,
+    ):
+        sql = """INSERT INTO alpha_withdrawal_requests
+                   (id, portfolio_id, amount, reason, requester, status)
+                   VALUES (?, ?, ?, ?, ?, ?)"""
+        values = (request_id, portfolio_id, amount, reason, requester, status)
+        if conn:
+            conn.execute(sql, values)
+        else:
+            with self._conn() as c:
+                c.execute(sql, values)
+
+    def has_year_end_rebalance(self, year: int, portfolio_id: str = "default") -> bool:
+        """检查指定年份是否已执行过年末强制再平衡。"""
+        with self._conn() as conn:
+            row = conn.execute(
+                """SELECT 1 FROM transactions
+                   WHERE portfolio_id = ?
+                     AND type = 'REBALANCE'
+                     AND reason LIKE '年末强制再平衡%'
+                     AND substr(date, 1, 4) = ?
+                   LIMIT 1""",
+                (portfolio_id, str(year)),
+            ).fetchone()
+            return row is not None
+
+    def get_alpha_withdrawal_request(self, request_id: str) -> Optional[dict]:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM alpha_withdrawal_requests WHERE id = ?",
+                (request_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def list_alpha_withdrawal_requests(
+        self,
+        portfolio_id: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 20,
+    ) -> list[dict]:
+        with self._conn() as conn:
+            where = []
+            values = []
+            if portfolio_id:
+                where.append("portfolio_id = ?")
+                values.append(portfolio_id)
+            if status:
+                where.append("status = ?")
+                values.append(status)
+
+            where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+            rows = conn.execute(
+                f"""SELECT * FROM alpha_withdrawal_requests
+                    {where_sql}
+                    ORDER BY created_at DESC LIMIT ?""",
+                values + [limit],
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def update_alpha_withdrawal_request(self, request_id: str, conn=None, **kwargs):
+        sets = ", ".join(f"{k} = ?" for k in kwargs)
+        values = list(kwargs.values()) + [request_id]
+        sql = f"""UPDATE alpha_withdrawal_requests
+                  SET {sets}, updated_at = CURRENT_TIMESTAMP
+                  WHERE id = ?"""
+        if conn:
+            conn.execute(sql, values)
+        else:
+            with self._conn() as c:
+                c.execute(sql, values)
+
+    def get_strategy(self, strategy_id: str, portfolio_id: str = "us") -> Optional[dict]:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM alpha_strategies WHERE portfolio_id = ? AND id = ?",
+                (portfolio_id, strategy_id),
+            ).fetchone()
             return dict(row) if row else None
 
     def list_strategies(self, portfolio_id: str = None) -> list[dict]:
@@ -518,27 +922,30 @@ class Database:
                 rows = conn.execute("SELECT * FROM alpha_strategies ORDER BY created_at").fetchall()
             return [dict(r) for r in rows]
 
-    def upsert_strategy(self, strategy_id: str, **kwargs):
+    def upsert_strategy(self, strategy_id: str, portfolio_id: str = "us", **kwargs):
         """创建或更新策略"""
         with self._conn() as conn:
-            existing = conn.execute("SELECT 1 FROM alpha_strategies WHERE id = ?", (strategy_id,)).fetchone()
+            existing = conn.execute(
+                "SELECT 1 FROM alpha_strategies WHERE portfolio_id = ? AND id = ?",
+                (portfolio_id, strategy_id),
+            ).fetchone()
             if existing:
                 sets = ", ".join(f"{k} = ?" for k in kwargs)
-                values = list(kwargs.values()) + [strategy_id]
+                values = list(kwargs.values()) + [portfolio_id, strategy_id]
                 conn.execute(
-                    f"UPDATE alpha_strategies SET {sets}, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    f"UPDATE alpha_strategies SET {sets}, updated_at = CURRENT_TIMESTAMP WHERE portfolio_id = ? AND id = ?",
                     values,
                 )
             else:
-                fields = ["id"] + list(kwargs.keys())
+                fields = ["portfolio_id", "id"] + list(kwargs.keys())
                 placeholders = ", ".join(["?"] * len(fields))
-                values = [strategy_id] + list(kwargs.values())
+                values = [portfolio_id, strategy_id] + list(kwargs.values())
                 conn.execute(
                     f"INSERT INTO alpha_strategies ({', '.join(fields)}) VALUES ({placeholders})",
                     values,
                 )
 
-    def update_strategy_status(self, strategy_id: str, status: str):
+    def update_strategy_status(self, strategy_id: str, status: str, portfolio_id: str = "us"):
         """启用/禁用策略"""
         now = __import__("datetime").datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with self._conn() as conn:
@@ -548,8 +955,8 @@ class Database:
             elif status in ("DISABLED", "SUSPENDED"):
                 extra = ", disabled_at = ?"
             conn.execute(
-                f"UPDATE alpha_strategies SET status = ?{extra}, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (status, now, strategy_id) if extra else (status, strategy_id),
+                f"UPDATE alpha_strategies SET status = ?{extra}, updated_at = CURRENT_TIMESTAMP WHERE portfolio_id = ? AND id = ?",
+                (status, now, portfolio_id, strategy_id) if extra else (status, portfolio_id, strategy_id),
             )
 
     def save_alpha_transaction(self, strategy_id: str, portfolio_id: str, date: str,
@@ -573,25 +980,27 @@ class Database:
                        total_pnl = total_pnl + ?,
                        trade_count = trade_count + 1,
                        updated_at = CURRENT_TIMESTAMP
-                   WHERE id = ?""",
-                (premium, pnl, strategy_id),
+                   WHERE portfolio_id = ? AND id = ?""",
+                (premium, pnl, portfolio_id, strategy_id),
             )
 
-    def get_alpha_transactions(self, strategy_id: str, limit: int = 20) -> list[dict]:
+    def get_alpha_transactions(self, strategy_id: str, portfolio_id: str = "us", limit: int = 20) -> list[dict]:
         with self._conn() as conn:
             rows = conn.execute(
-                "SELECT * FROM alpha_transactions WHERE strategy_id = ? ORDER BY date DESC LIMIT ?",
-                (strategy_id, limit),
+                """SELECT * FROM alpha_transactions
+                   WHERE portfolio_id = ? AND strategy_id = ?
+                   ORDER BY date DESC LIMIT ?""",
+                (portfolio_id, strategy_id, limit),
             ).fetchall()
             return [dict(r) for r in rows]
 
-    def save_alpha_snapshot(self, strategy_id: str, date: str, capital: float,
+    def save_alpha_snapshot(self, strategy_id: str, portfolio_id: str, date: str, capital: float,
                              nav: float, daily_return: float = 0, cumulative_return: float = 0,
                              drawdown: float = 0):
         with self._conn() as conn:
             conn.execute(
                 """INSERT OR REPLACE INTO alpha_snapshots
-                   (strategy_id, date, capital, nav, daily_return, cumulative_return, drawdown)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (strategy_id, date, capital, nav, daily_return, cumulative_return, drawdown),
+                   (portfolio_id, strategy_id, date, capital, nav, daily_return, cumulative_return, drawdown)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (portfolio_id, strategy_id, date, capital, nav, daily_return, cumulative_return, drawdown),
             )

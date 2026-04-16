@@ -50,7 +50,7 @@ class GridTradingStrategy(AlphaStrategy):
     GRID_SPACING = 0.02        # 每格 2%
     STOP_LOSS_PCT = -0.10      # 止损 -10%
 
-    def run(self, portfolio_id: str, current_date: str, spy_price: float, nav: float) -> dict:
+    def run(self, portfolio_id: str, current_date: str, spy_price: float) -> dict:
         """
         每个交易日检查网格触发。
 
@@ -62,22 +62,23 @@ class GridTradingStrategy(AlphaStrategy):
         if not self.is_enabled(portfolio_id):
             return {"action": "SKIP", "reason": "策略未启用"}
 
-        strategy = self.db.get_strategy(self.STRATEGY_ID)
-        allocation_pct = strategy.get("allocation_pct", self.DEFAULT_ALLOCATION)
-        capital = nav * allocation_pct
+        strategy, alpha_account, capital = self.get_allocated_capital(portfolio_id)
+        alpha_balance = float(alpha_account.get("cash_balance", 0.0))
+        if alpha_balance <= 0:
+            return {"action": "SKIP", "reason": "Alpha 独立账本余额为 0"}
 
         # 获取最近交易记录，判断是否初始化过
-        recent_txs = self.db.get_alpha_transactions(self.STRATEGY_ID, limit=50)
+        recent_txs = self.db.get_alpha_transactions(self.STRATEGY_ID, portfolio_id=portfolio_id, limit=50)
         init_txs = [t for t in recent_txs if t["action"] == "GRID_INIT"]
 
         if not init_txs:
-            return self._initialize_grid(portfolio_id, current_date, spy_price, capital)
+            return self._initialize_grid(portfolio_id, current_date, spy_price, capital, alpha_balance)
 
         # 已初始化：检查网格触发
         return self._check_grid(portfolio_id, current_date, spy_price, capital, strategy, recent_txs)
 
     def _initialize_grid(self, portfolio_id: str, current_date: str,
-                         spy_price: float, capital: float) -> dict:
+                         spy_price: float, capital: float, alpha_balance: float) -> dict:
         """首次运行：建立网格并买入底仓"""
         # 基准价格
         base_price = spy_price
@@ -112,7 +113,7 @@ class GridTradingStrategy(AlphaStrategy):
             detail=grid_info,
         )
 
-        self.db.upsert_strategy(self.STRATEGY_ID, capital=capital)
+        self.db.upsert_strategy(self.STRATEGY_ID, portfolio_id=portfolio_id, capital=capital)
 
         logger.info(f"网格初始化: {grid_info}")
         return {
@@ -121,6 +122,7 @@ class GridTradingStrategy(AlphaStrategy):
             "initial_shares": initial_shares,
             "grid_count": self.GRID_COUNT * 2,
             "capital": round(capital, 2),
+            "alpha_balance": round(alpha_balance, 2),
         }
 
     def _check_grid(self, portfolio_id: str, current_date: str, spy_price: float,
@@ -169,7 +171,7 @@ class GridTradingStrategy(AlphaStrategy):
                 detail=f"止损触发: PnL {pnl_pct:.1%}, 卖出 {shares} 股",
             )
             logger.warning(f"网格止损: PnL {pnl_pct:.1%}")
-            self._save_snapshot(current_date, capital, strategy)
+            self._save_snapshot(portfolio_id, current_date, capital, strategy)
             return {"action": "GRID_STOP", "pnl": round(pnl, 2), "pnl_pct": round(pnl_pct, 4)}
 
         # 计算当前价格在哪一格
@@ -181,7 +183,7 @@ class GridTradingStrategy(AlphaStrategy):
 
         # 比较：是否穿越了新的网格线
         if current_grid == last_trade_grid:
-            self._save_snapshot(current_date, capital, strategy)
+            self._save_snapshot(portfolio_id, current_date, capital, strategy)
             return {"action": "HOLD", "reason": f"价格在同一格内（格位 {current_grid}）"}
 
         per_grid = capital / (self.GRID_COUNT * 2)
@@ -203,14 +205,14 @@ class GridTradingStrategy(AlphaStrategy):
                 detail=f"格位 {last_trade_grid}→{current_grid}, 买入 {qty} 股 @ ${spy_price:.2f}",
             )
             logger.info(f"网格买入: {qty} 股 @ ${spy_price:.2f} (格位 {current_grid})")
-            self._save_snapshot(current_date, capital, strategy)
+            self._save_snapshot(portfolio_id, current_date, capital, strategy)
             return {"action": "GRID_BUY", "quantity": qty, "price": spy_price, "grid_level": current_grid}
 
         else:
             # 价格上涨穿越网格线 → 卖出
             sell_qty = min(qty, shares)
             if sell_qty <= 0:
-                self._save_snapshot(current_date, capital, strategy)
+                self._save_snapshot(portfolio_id, current_date, capital, strategy)
                 return {"action": "HOLD", "reason": "无持仓可卖"}
 
             # 估算卖出利润（每格 2% 的价差）
@@ -228,7 +230,7 @@ class GridTradingStrategy(AlphaStrategy):
                 detail=f"格位 {last_trade_grid}→{current_grid}, 卖出 {sell_qty} 股 @ ${spy_price:.2f}, 利润 ${grid_profit:.2f}",
             )
             logger.info(f"网格卖出: {sell_qty} 股 @ ${spy_price:.2f}, 利润 ${grid_profit:.2f}")
-            self._save_snapshot(current_date, capital, strategy)
+            self._save_snapshot(portfolio_id, current_date, capital, strategy)
             return {"action": "GRID_SELL", "quantity": sell_qty, "price": spy_price,
                     "profit": round(grid_profit, 2), "grid_level": current_grid}
 
@@ -240,7 +242,7 @@ class GridTradingStrategy(AlphaStrategy):
                 return int((last_price - base_price) / base_price / self.GRID_SPACING)
         return 0
 
-    def _save_snapshot(self, current_date: str, capital: float, strategy: dict):
+    def _save_snapshot(self, portfolio_id: str, current_date: str, capital: float, strategy: dict):
         """保存每日快照"""
         total_pnl = strategy.get("total_pnl", 0)
         nav = capital + total_pnl
@@ -248,6 +250,7 @@ class GridTradingStrategy(AlphaStrategy):
         cum_return = (nav / initial - 1) if initial > 0 else 0
         self.db.save_alpha_snapshot(
             strategy_id=self.STRATEGY_ID,
+            portfolio_id=portfolio_id,
             date=current_date,
             capital=capital,
             nav=nav,

@@ -58,7 +58,7 @@ class MomentumRotationStrategy(AlphaStrategy):
     # 模拟 TLT 价格与 SPY 的关系
     TLT_SPY_RATIO = 0.20       # 假设 TLT ≈ SPY * 0.20（用于模拟）
 
-    def run(self, portfolio_id: str, current_date: str, spy_price: float, nav: float) -> dict:
+    def run(self, portfolio_id: str, current_date: str, spy_price: float) -> dict:
         """
         每月评估动量并执行轮动。
 
@@ -69,30 +69,31 @@ class MomentumRotationStrategy(AlphaStrategy):
         if not self.is_enabled(portfolio_id):
             return {"action": "SKIP", "reason": "策略未启用"}
 
-        strategy = self.db.get_strategy(self.STRATEGY_ID)
-        allocation_pct = strategy.get("allocation_pct", self.DEFAULT_ALLOCATION)
-        capital = nav * allocation_pct
+        strategy, alpha_account, capital = self.get_allocated_capital(portfolio_id)
+        alpha_balance = float(alpha_account.get("cash_balance", 0.0))
+        if alpha_balance <= 0:
+            return {"action": "SKIP", "reason": "Alpha 独立账本余额为 0"}
 
         # 检查是否月初（日期 <= 5）
         dt = datetime.strptime(current_date, "%Y-%m-%d")
         if dt.day > 5:
-            self._save_snapshot(current_date, capital, spy_price, strategy)
+            self._save_snapshot(portfolio_id, current_date, capital, spy_price, strategy)
             return {"action": "HOLD", "reason": "非月初，等待下次评估"}
 
         # 检查本月是否已评估
-        recent_txs = self.db.get_alpha_transactions(self.STRATEGY_ID, limit=1)
+        recent_txs = self.db.get_alpha_transactions(self.STRATEGY_ID, portfolio_id=portfolio_id, limit=1)
         if recent_txs and recent_txs[0]["date"][:7] == current_date[:7]:
             return {"action": "SKIP", "reason": "本月已完成评估"}
 
         # 获取历史交易判断当前持仓
-        all_txs = self.db.get_alpha_transactions(self.STRATEGY_ID, limit=50)
+        all_txs = self.db.get_alpha_transactions(self.STRATEGY_ID, portfolio_id=portfolio_id, limit=50)
         current_holding = self._get_current_holding(all_txs)
         last_entry_price = self._get_last_entry_price(all_txs)
 
         if current_holding is None:
             # 首次运行：默认买入 SPY
             return self._enter_position(portfolio_id, current_date, "SPY",
-                                        spy_price, capital, "首次建仓，默认持有 SPY")
+                                        spy_price, capital, alpha_balance, "首次建仓，默认持有 SPY")
 
         # 模拟 TLT 价格（实盘需替换为真实数据）
         tlt_price = spy_price * self.TLT_SPY_RATIO
@@ -134,7 +135,7 @@ class MomentumRotationStrategy(AlphaStrategy):
             detail=f"保持 {current_holding}，动量 {current_momentum:+.2%} vs {alt_asset} {alt_momentum:+.2%}",
         )
 
-        self._save_snapshot(current_date, capital, spy_price, strategy)
+        self._save_snapshot(portfolio_id, current_date, capital, spy_price, strategy)
         return {
             "action": "HOLD",
             "holding": current_holding,
@@ -144,7 +145,7 @@ class MomentumRotationStrategy(AlphaStrategy):
         }
 
     def _enter_position(self, portfolio_id: str, current_date: str, asset: str,
-                        spy_price: float, capital: float, reason: str) -> dict:
+                        spy_price: float, capital: float, alpha_balance: float, reason: str) -> dict:
         """建仓：买入指定资产"""
         price = spy_price if asset == "SPY" else spy_price * self.TLT_SPY_RATIO
         shares = int(capital / price)
@@ -163,7 +164,7 @@ class MomentumRotationStrategy(AlphaStrategy):
             detail=f"{reason}，买入 {asset} {shares} 股 @ ${price:.2f}",
         )
 
-        self.db.upsert_strategy(self.STRATEGY_ID, capital=capital)
+        self.db.upsert_strategy(self.STRATEGY_ID, portfolio_id=portfolio_id, capital=capital)
         logger.info(f"动量建仓: {asset} {shares} 股 @ ${price:.2f}")
 
         return {
@@ -172,6 +173,7 @@ class MomentumRotationStrategy(AlphaStrategy):
             "shares": shares,
             "price": price,
             "capital": round(capital, 2),
+            "alpha_balance": round(alpha_balance, 2),
         }
 
     def _switch_position(self, portfolio_id: str, current_date: str,
@@ -182,7 +184,9 @@ class MomentumRotationStrategy(AlphaStrategy):
         to_price = spy_price if to_asset == "SPY" else spy_price * self.TLT_SPY_RATIO
 
         # 计算卖出利润
-        last_entry = self._get_last_entry_price(self.db.get_alpha_transactions(self.STRATEGY_ID, limit=50))
+        last_entry = self._get_last_entry_price(
+            self.db.get_alpha_transactions(self.STRATEGY_ID, portfolio_id=portfolio_id, limit=50)
+        )
         sell_pnl = 0
         if last_entry > 0:
             sell_pnl = (from_price - last_entry) / last_entry * capital
@@ -219,8 +223,8 @@ class MomentumRotationStrategy(AlphaStrategy):
 
         logger.info(f"动量轮动: {from_asset} → {to_asset}, PnL ${sell_pnl:,.2f}")
 
-        strategy = self.db.get_strategy(self.STRATEGY_ID)
-        self._save_snapshot(current_date, capital, spy_price, strategy)
+        strategy = self.db.get_strategy(self.STRATEGY_ID, portfolio_id=portfolio_id)
+        self._save_snapshot(portfolio_id, current_date, capital, spy_price, strategy)
 
         return {
             "action": "MOM_SWITCH",
@@ -261,7 +265,7 @@ class MomentumRotationStrategy(AlphaStrategy):
         pseudo = ((seed * 7919) % 1000) / 1000.0  # 0~1
         return (pseudo - 0.4) * 0.08  # -3.2% ~ +4.8%
 
-    def _save_snapshot(self, current_date: str, capital: float, spy_price: float, strategy: dict):
+    def _save_snapshot(self, portfolio_id: str, current_date: str, capital: float, spy_price: float, strategy: dict):
         """保存每日快照"""
         total_pnl = strategy.get("total_pnl", 0) if strategy else 0
         nav = capital + total_pnl
@@ -270,6 +274,7 @@ class MomentumRotationStrategy(AlphaStrategy):
         cum_return = (nav / initial - 1) if initial > 0 else 0
         self.db.save_alpha_snapshot(
             strategy_id=self.STRATEGY_ID,
+            portfolio_id=portfolio_id,
             date=current_date,
             capital=capital,
             nav=nav,

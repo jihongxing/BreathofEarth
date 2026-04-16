@@ -15,6 +15,7 @@ PORTFOLIOS = {
         "name": "美股组合",
         "currency": "$",
         "assets": ["SPY", "TLT", "GLD", "SHV"],
+        "max_data_lag_days": 4,  # 跨时区 + 周末容忍，超过视为数据过期
         "asset_names": {
             "SPY": "标普500",
             "TLT": "长期国债",
@@ -27,6 +28,7 @@ PORTFOLIOS = {
         "name": "中国组合",
         "currency": "¥",
         "assets": ["510300.SS", "511010.SS", "518880.SS", "MONEY"],
+        "max_data_lag_days": 3,  # 周末容忍，超过视为数据过期
         "asset_names": {
             "510300.SS": "沪深300",
             "511010.SS": "国债ETF",
@@ -81,6 +83,7 @@ CORR_WINDOW = 30
 
 DRIFT_THRESHOLD = 0.05
 FEE_RATE = 0.001
+MAX_EXECUTION_SLIPPAGE_PCT = 0.005   # 成交偏差超过 0.5% 进入人工复核
 
 # ── 冷却期 ────────────────────────────────────────────
 
@@ -140,6 +143,9 @@ def validate_config():
     assert 0 <= FEE_RATE < 0.01, \
         f"FEE_RATE 应在 [0, 0.01) 范围内，当前: {FEE_RATE}"
 
+    assert 0 < MAX_EXECUTION_SLIPPAGE_PCT <= 0.02, \
+        f"MAX_EXECUTION_SLIPPAGE_PCT 应在 (0, 2%] 范围内，当前: {MAX_EXECUTION_SLIPPAGE_PCT:.2%}"
+
     # 冷却期校验
     assert 5 <= COOLDOWN_DAYS <= 60, \
         f"COOLDOWN_DAYS 应在 [5, 60] 天范围内，当前: {COOLDOWN_DAYS}"
@@ -152,10 +158,13 @@ def validate_config():
         assert "currency" in pf, f"组合 {pid} 缺少 currency 字段"
         assert "assets" in pf, f"组合 {pid} 缺少 assets 字段"
         assert "asset_names" in pf, f"组合 {pid} 缺少 asset_names 字段"
+        assert "max_data_lag_days" in pf, f"组合 {pid} 缺少 max_data_lag_days 字段"
 
         assets = pf["assets"]
         assert len(assets) == 4, f"组合 {pid} 必须有 4 个资产，当前: {len(assets)}"
         assert len(assets) == len(set(assets)), f"组合 {pid} 资产列表有重复: {assets}"
+        assert 1 <= pf["max_data_lag_days"] <= 7, \
+            f"组合 {pid} 的 max_data_lag_days 应在 [1, 7] 范围内，当前: {pf['max_data_lag_days']}"
 
         asset_names = pf["asset_names"]
         for asset in assets:

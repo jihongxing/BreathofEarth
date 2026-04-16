@@ -29,6 +29,9 @@ def list_available_strategies() -> list[dict]:
             "name": cls.STRATEGY_NAME,
             "description": cls.DESCRIPTION,
             "default_allocation": cls.DEFAULT_ALLOCATION,
+            "formal_reporting_eligible": cls.FORMAL_REPORTING_ELIGIBLE,
+            "reporting_scope": cls.get_reporting_scope(),
+            "reporting_note": cls.REPORTING_NOTE,
         }
         for cls in REGISTRY.values()
     ]

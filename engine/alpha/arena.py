@@ -32,12 +32,16 @@ class StrategyArena:
     MAX_DRAWDOWN_LIMIT = -0.15      # 最大回撤 > 15% 直接暂停
     EVAL_WINDOW_DAYS = 90           # 评估窗口：90 天
     MIN_EVAL_DAYS = 30              # 最少运行 30 天才评估
+    REALLOCATION_BUDGET_PCT = 0.50  # 竞技场最多仅重分配 Alpha 账本的 50%，其余留作缓冲
 
     def __init__(self, db: Database):
         self.db = db
 
-    def run_all(self, portfolio_id: str, current_date: str,
-                spy_price: float, nav: float) -> list[dict]:
+    def _is_formal_strategy(self, strategy_id: str) -> bool:
+        cls = REGISTRY.get(strategy_id)
+        return bool(cls and cls.FORMAL_REPORTING_ELIGIBLE)
+
+    def run_all(self, portfolio_id: str, current_date: str, spy_price: float) -> list[dict]:
         """
         运行所有 ENABLED 策略。
 
@@ -57,7 +61,6 @@ class StrategyArena:
                     portfolio_id=portfolio_id,
                     current_date=current_date,
                     spy_price=spy_price,
-                    nav=nav,
                 )
                 result["strategy_id"] = strategy_id
                 results.append(result)
@@ -82,15 +85,20 @@ class StrategyArena:
         strategies = self.db.list_strategies(portfolio_id)
         evaluations = []
 
+        excluded = []
         for s in strategies:
             sid = s["id"]
             if sid not in REGISTRY:
                 continue
+            if not self._is_formal_strategy(sid):
+                excluded.append(sid)
+                continue
 
-            snapshots = self._get_snapshots(sid, self.EVAL_WINDOW_DAYS)
+            snapshots = self._get_snapshots(sid, portfolio_id, self.EVAL_WINDOW_DAYS)
             if len(snapshots) < self.MIN_EVAL_DAYS:
                 evaluations.append({
                     "strategy_id": sid,
+                    "portfolio_id": portfolio_id,
                     "name": s["name"],
                     "status": s["status"],
                     "verdict": "INSUFFICIENT_DATA",
@@ -104,6 +112,7 @@ class StrategyArena:
 
             evaluations.append({
                 "strategy_id": sid,
+                "portfolio_id": portfolio_id,
                 "name": s["name"],
                 "status": s["status"],
                 "metrics": metrics,
@@ -113,18 +122,20 @@ class StrategyArena:
 
             # 执行淘汰
             if verdict == "SUSPEND" and s["status"] == "ENABLED":
-                self.db.update_strategy_status(sid, "SUSPENDED")
+                self.db.update_strategy_status(sid, "SUSPENDED", portfolio_id=portfolio_id)
                 logger.warning(f"策略 {sid} 被暂停: {reason}")
 
         # 资金再分配（仅 ENABLED 策略）
-        allocation = self._reallocate(evaluations)
+        allocation = self._reallocate(evaluations, portfolio_id)
 
         report = {
             "date": datetime.now().strftime("%Y-%m-%d"),
             "portfolio_id": portfolio_id,
             "evaluations": evaluations,
             "allocation": allocation,
-            "summary": self._generate_summary(evaluations),
+            "excluded_sandbox_strategies": excluded,
+            "reporting_scope": "formal_only",
+            "summary": self._generate_summary(evaluations, excluded_count=len(excluded)),
         }
 
         # 保存评估结果到审计日志
@@ -145,22 +156,29 @@ class StrategyArena:
         """
         strategies = self.db.list_strategies(portfolio_id)
         board = []
+        alpha_account = self.db.get_alpha_account(portfolio_id)
+        alpha_balance = float(alpha_account.get("cash_balance", 0.0))
 
         for s in strategies:
             sid = s["id"]
             if sid not in REGISTRY:
                 continue
+            if not self._is_formal_strategy(sid):
+                continue
 
-            snapshots = self._get_snapshots(sid, self.EVAL_WINDOW_DAYS)
+            snapshots = self._get_snapshots(sid, portfolio_id, self.EVAL_WINDOW_DAYS)
             metrics = self._calculate_metrics(snapshots) if len(snapshots) >= 2 else {}
+            allocation_pct = float(s.get("allocation_pct", 0))
 
             board.append({
                 "rank": 0,
                 "strategy_id": sid,
                 "name": s["name"],
                 "status": s["status"],
-                "allocation_pct": s.get("allocation_pct", 0),
-                "capital": s.get("capital", 0),
+                "allocation_pct": allocation_pct,
+                "capital": round(alpha_balance * allocation_pct, 2),
+                "alpha_balance": round(alpha_balance, 2),
+                "capital_source": "alpha_ledger",
                 "total_premium": s.get("total_premium", 0),
                 "total_pnl": s.get("total_pnl", 0),
                 "trade_count": s.get("trade_count", 0),
@@ -180,14 +198,14 @@ class StrategyArena:
 
     # ── 内部方法 ──────────────────────────────────────
 
-    def _get_snapshots(self, strategy_id: str, days: int) -> list[dict]:
+    def _get_snapshots(self, strategy_id: str, portfolio_id: str, days: int) -> list[dict]:
         """获取策略日快照"""
         with self.db._conn() as conn:
             rows = conn.execute(
                 """SELECT * FROM alpha_snapshots
-                   WHERE strategy_id = ?
+                   WHERE portfolio_id = ? AND strategy_id = ?
                    ORDER BY date DESC LIMIT ?""",
-                (strategy_id, days),
+                (portfolio_id, strategy_id, days),
             ).fetchall()
             return [dict(r) for r in reversed(rows)]
 
@@ -262,7 +280,7 @@ class StrategyArena:
 
         return "PASS", f"表现良好（夏普 {sharpe:.2f}）"
 
-    def _reallocate(self, evaluations: list[dict]) -> dict:
+    def _reallocate(self, evaluations: list[dict], portfolio_id: str) -> dict:
         """按夏普比率加权重新分配资金"""
         active = [e for e in evaluations
                   if e.get("verdict") in ("PASS", "WARNING")
@@ -275,22 +293,33 @@ class StrategyArena:
         allocation = {}
         for e in active:
             weight = e["metrics"]["sharpe"] / total_sharpe if total_sharpe > 0 else 1 / len(active)
+            allocation_pct = round(weight * self.REALLOCATION_BUDGET_PCT, 4)
             allocation[e["strategy_id"]] = {
                 "weight": round(weight, 4),
+                "allocation_pct": allocation_pct,
                 "sharpe": e["metrics"]["sharpe"],
             }
             # 更新数据库
-            self.db.upsert_strategy(e["strategy_id"], allocation_pct=round(weight * 0.10, 4))
+            self.db.upsert_strategy(
+                e["strategy_id"],
+                portfolio_id=portfolio_id,
+                allocation_pct=allocation_pct,
+            )
 
         return allocation
 
-    def _generate_summary(self, evaluations: list[dict]) -> str:
+    def _generate_summary(self, evaluations: list[dict], excluded_count: int = 0) -> str:
         """生成评估摘要"""
         total = len(evaluations)
         passed = sum(1 for e in evaluations if e.get("verdict") == "PASS")
         warned = sum(1 for e in evaluations if e.get("verdict") == "WARNING")
         suspended = sum(1 for e in evaluations if e.get("verdict") == "SUSPEND")
         insufficient = sum(1 for e in evaluations if e.get("verdict") == "INSUFFICIENT_DATA")
+
+        if total == 0:
+            if excluded_count:
+                return f"无正式可评估策略，已排除 {excluded_count} 个沙盒策略"
+            return "无正式可评估策略"
 
         parts = [f"共 {total} 个策略"]
         if passed:
@@ -301,5 +330,7 @@ class StrategyArena:
             parts.append(f"{suspended} 个暂停")
         if insufficient:
             parts.append(f"{insufficient} 个数据不足")
+        if excluded_count:
+            parts.append(f"{excluded_count} 个沙盒策略已排除")
 
         return "，".join(parts)

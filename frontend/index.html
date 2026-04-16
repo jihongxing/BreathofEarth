@@ -256,6 +256,125 @@
     <div class="section-header">
       <h3 data-i18n="alphaTitle">达尔文沙盒 — Alpha 策略竞技场</h3>
     </div>
+    <div id="alpha-ledger-box" class="alpha-ledger-box">
+      <div class="alpha-ledger-header">
+        <div>
+          <h4 data-i18n="alphaLedgerTitle">Alpha 独立账本</h4>
+          <p class="alpha-ledger-note" data-i18n="alphaManualOnlyHint">Alpha 出金只允许提交人工出金申请，系统不会自动打款或自动扣账。</p>
+        </div>
+        <div class="alpha-withdraw-toolbar">
+          <button id="btn-alpha-manual-in" class="btn-sm" hidden data-i18n="alphaManualInflow" aria-label="Record manual alpha inflow">人工入账</button>
+          <button id="btn-alpha-manual-out" class="btn-sm" hidden data-i18n="alphaManualOutflow" aria-label="Record manual alpha outflow">人工出账记账</button>
+          <button id="btn-alpha-withdraw-request" class="btn-sm" hidden data-i18n="alphaWithdrawRequest" aria-label="Submit manual alpha withdrawal request">提交人工出金申请</button>
+        </div>
+      </div>
+      <div id="alpha-ledger-summary" class="stats-row"></div>
+      <div id="alpha-ledger-entry-form-box" class="form-box" hidden>
+        <form id="alpha-ledger-entry-form" novalidate>
+          <label for="alpha-entry-direction" data-i18n="alphaLedgerDirection">方向</label>
+          <select id="alpha-entry-direction" required aria-required="true">
+            <option value="IN" data-i18n="alphaDirectionIn">入账</option>
+            <option value="OUT" data-i18n="alphaDirectionOut">出账</option>
+          </select>
+          <label for="alpha-entry-amount" data-i18n="amountUSD">金额 (USD)</label>
+          <input type="number" id="alpha-entry-amount" min="1" step="0.01" required aria-required="true">
+          <label for="alpha-entry-note" data-i18n="alphaEntryNote">备注</label>
+          <textarea id="alpha-entry-note" rows="2" required aria-required="true"></textarea>
+          <label for="alpha-entry-ref" data-i18n="alphaEntryExtRef">外部流水号</label>
+          <input type="text" id="alpha-entry-ref" maxlength="120">
+          <label for="alpha-entry-request-id" data-i18n="alphaEntryLinkRequest">关联申请ID</label>
+          <input type="text" id="alpha-entry-request-id" maxlength="64">
+          <p class="form-note" data-i18n="alphaEntryFormHint">这里只记录线下已完成的资金变动，不会触发真实打款。</p>
+          <div class="form-actions">
+            <button type="submit" class="btn-primary" data-i18n="alphaEntrySubmit">登记账务流水</button>
+            <button type="button" id="btn-alpha-entry-cancel" class="btn-sm" data-i18n="cancel">取消</button>
+          </div>
+        </form>
+      </div>
+      <div class="alpha-ledger-entries">
+        <h4 data-i18n="alphaLedgerEntriesTitle">人工账务流水</h4>
+        <table aria-label="Alpha ledger entries">
+          <caption class="sr-only" data-i18n="alphaLedgerEntriesTitle">人工账务流水</caption>
+          <thead>
+            <tr>
+              <th data-i18n="thDate">日期</th>
+              <th data-i18n="alphaLedgerDirection">方向</th>
+              <th data-i18n="thAmount">金额</th>
+              <th data-i18n="alphaBalanceAfter">记账后余额</th>
+              <th data-i18n="alphaEntryNote">备注</th>
+              <th data-i18n="alphaActor">操作人</th>
+            </tr>
+          </thead>
+          <tbody id="alpha-ledger-entries-body"></tbody>
+        </table>
+      </div>
+      <div id="alpha-withdraw-form-box" class="form-box" hidden>
+        <form id="alpha-withdraw-form" novalidate>
+          <label for="alpha-w-amount" data-i18n="amountUSD">金额 (USD)</label>
+          <input type="number" id="alpha-w-amount" min="1" step="0.01" required aria-required="true">
+          <label for="alpha-w-reason" data-i18n="alphaWithdrawReason">申请原因</label>
+          <textarea id="alpha-w-reason" rows="2" required aria-required="true"></textarea>
+          <p class="form-note" data-i18n="alphaWithdrawFormHint">提交后仅登记人工出金申请，不会自动扣减 Alpha 账本余额。</p>
+          <div class="form-actions">
+            <button type="submit" id="btn-alpha-withdraw-submit" class="btn-primary" data-i18n="alphaWithdrawRequest">提交人工出金申请</button>
+            <button type="button" id="btn-alpha-withdraw-cancel" class="btn-sm" data-i18n="cancel">取消</button>
+          </div>
+        </form>
+      </div>
+    </div>
+    <div id="alpha-withdrawals-box" class="alpha-ledger-box">
+      <div class="alpha-ledger-header">
+        <div>
+          <h4 data-i18n="alphaWithdrawalDeskTitle">Alpha 人工出金处理台</h4>
+          <p class="alpha-ledger-note" data-i18n="alphaWithdrawalDeskHint">这里仅登记申请与回填人工处理结果，不代表系统已自动出金。</p>
+        </div>
+        <div class="alpha-withdraw-toolbar">
+          <label for="alpha-withdraw-status-filter" class="sr-only" data-i18n="alphaStatusFilter">状态筛选</label>
+          <select id="alpha-withdraw-status-filter" class="bg-surface text-gray-200 border border-border rounded-lg px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all duration-200">
+            <option value="" data-i18n="alphaStatusAll">全部状态</option>
+            <option value="PENDING_MANUAL" data-i18n="alphaStatusPending">待人工处理</option>
+            <option value="HANDLED" data-i18n="alphaStatusHandled">已人工处理</option>
+            <option value="REJECTED" data-i18n="alphaStatusRejected">已拒绝</option>
+            <option value="CANCELLED" data-i18n="alphaStatusCancelled">已取消</option>
+          </select>
+        </div>
+      </div>
+      <table aria-label="Alpha withdrawal requests">
+        <caption class="sr-only" data-i18n="alphaWithdrawalDeskTitle">Alpha 人工出金处理台</caption>
+        <thead>
+          <tr>
+            <th data-i18n="thId">ID</th>
+            <th data-i18n="thAmount">金额</th>
+            <th data-i18n="thReason">原因</th>
+            <th data-i18n="thRequester">发起人</th>
+            <th data-i18n="thStatus">状态</th>
+            <th data-i18n="thDate">日期</th>
+            <th data-i18n="thAction">操作</th>
+          </tr>
+        </thead>
+        <tbody id="alpha-withdrawals-body"></tbody>
+      </table>
+      <div id="alpha-withdraw-handle-box" class="form-box" hidden>
+        <h4><span data-i18n="alphaHandleTitle">回填人工处理结果</span> <span id="alpha-handle-request-id"></span></h4>
+        <form id="alpha-withdraw-handle-form" novalidate>
+          <label for="alpha-handle-status" data-i18n="thStatus">状态</label>
+          <select id="alpha-handle-status" required aria-required="true">
+            <option value="HANDLED" data-i18n="alphaStatusHandled">已人工处理</option>
+            <option value="REJECTED" data-i18n="alphaStatusRejected">已拒绝</option>
+            <option value="CANCELLED" data-i18n="alphaStatusCancelled">已取消</option>
+          </select>
+          <label for="alpha-handle-note" data-i18n="alphaHandleNote">处理备注</label>
+          <textarea id="alpha-handle-note" rows="2"></textarea>
+          <label for="alpha-handle-ref" data-i18n="alphaExternalRef">外部流水号</label>
+          <input type="text" id="alpha-handle-ref" maxlength="120">
+          <p class="form-note" data-i18n="alphaHandleFormHint">这一步只回填人工处理结果，不会触发系统自动出金或自动扣账。</p>
+          <div class="form-actions">
+            <button type="submit" class="btn-primary" data-i18n="alphaSubmitHandle">提交处理结果</button>
+            <button type="button" id="btn-alpha-handle-cancel" class="btn-sm" data-i18n="cancel">取消</button>
+          </div>
+        </form>
+      </div>
+    </div>
     <div id="arena-controls" class="flex gap-2 mb-4" hidden>
       <button id="btn-arena-run-all" class="btn-primary" data-i18n="runAll" aria-label="Run all strategies">运行所有策略</button>
       <button id="btn-arena-evaluate" class="btn-sm" data-i18n="quarterlyEval" aria-label="Quarterly evaluation">季度评估</button>

@@ -8,6 +8,7 @@ let token = localStorage.getItem("xirang_token");
 let currentUser = null;
 let currentPortfolio = "us";
 let navChart = null, drawdownChart = null, weightsChart = null;
+let currentAlphaHandleRequestId = null;
 
 // ── Toast 通知系统 ─────────────────────────────────
 
@@ -82,6 +83,18 @@ function esc(str) {
 
 function isAuthed() {
   return !!(token && currentUser);
+}
+
+function withPortfolio(path) {
+  var sep = path.indexOf("?") === -1 ? "?" : "&";
+  return path + sep + "portfolio_id=" + encodeURIComponent(currentPortfolio);
+}
+
+function getActiveTabName() {
+  var activeMain = document.querySelector(".tab.active");
+  if (activeMain) return activeMain.dataset.tab;
+  var activeDropdown = document.querySelector(".tab-dropdown-item.active");
+  return activeDropdown ? activeDropdown.dataset.tab : null;
 }
 
 // ── 骨架屏辅助 ─────────────────────────────────────
@@ -262,9 +275,8 @@ async function enterApp() {
 }
 
 function refreshUI() {
-  var activeTab = document.querySelector(".tab.active");
-  if (!activeTab) return;
-  var tab = activeTab.dataset.tab;
+  var tab = getActiveTabName();
+  if (!tab) return;
   if (tab === "dashboard") loadDashboard();
   else if (tab === "transactions") loadTransactions();
   else if (tab === "withdrawals") loadWithdrawals();
@@ -345,8 +357,7 @@ document.querySelectorAll(".tab").forEach(function(tab) {
 
 document.getElementById("portfolio-select").addEventListener("change", function(e) {
   currentPortfolio = e.target.value;
-  loadDashboard();
-  loadWithdrawals();
+  refreshUI();
 });
 
 // ── 仪表盘 ─────────────────────────────────────────
@@ -1015,11 +1026,15 @@ async function loadTransactions() {
 async function loadAlpha() {
   if (!isAuthed()) return;
   try {
-    var strategies = await api("/api/alpha/strategies");
+    var strategies = await api(withPortfolio("/api/alpha/strategies"));
+    var ledger = await api(withPortfolio("/api/alpha/ledger"));
     var container = document.getElementById("alpha-strategies");
     var isAdmin = currentUser.role === "admin";
 
+    renderAlphaLedger(ledger, isAdmin);
+    loadAlphaLedgerEntries();
     document.getElementById("arena-controls").hidden = !isAdmin;
+    loadAlphaWithdrawalRequests();
 
     if (!strategies.length) {
       container.innerHTML = emptyStateHTML("🧪", "noStrategies");
@@ -1040,14 +1055,21 @@ async function loadAlpha() {
       var toggleLabel = enabled ? t("toggleDisable") : t("toggleEnable");
       var toggleAction = enabled ? "disable" : "enable";
       var display = getStrategyDisplay(s.id);
+      var sandboxOnly = !s.formal_reporting_eligible;
+      var reportingBadge = sandboxOnly
+        ? '<span class="badge badge-pending" style="margin-left:8px">' + esc(t("alphaSandboxOnly")) + '</span>'
+        : "";
+      var reportingNote = sandboxOnly
+        ? '<div style="color:var(--text-dim);font-size:0.75rem;margin-top:6px">' + esc(s.reporting_note || t("alphaFormalExcluded")) + '</div>'
+        : "";
 
-      return '<div class="stat-card" style="margin-bottom:12px"><div style="display:flex;justify-content:space-between;align-items:center"><div><span style="font-size:1.1rem">' + display.icon + '</span> <strong>' + esc(s.name) + '</strong> <span class="badge ' + badge + '" style="margin-left:8px">' + esc(statusText) + '</span></div><div style="display:flex;gap:8px">' + (isAdmin ? '<button class="btn-sm" data-sid="' + esc(s.id) + '" data-action="' + toggleAction + '" aria-label="' + esc(toggleLabel) + " " + esc(s.name) + '">' + esc(toggleLabel) + '</button>' : '') + (isAdmin && enabled ? '<button class="btn-primary" data-sid="' + esc(s.id) + '" data-run="1" aria-label="' + esc(t("manualRun")) + " " + esc(s.name) + '">' + esc(t("manualRun")) + '</button>' : '') + '</div></div><div style="color:var(--text-dim);font-size:0.8rem;margin-top:6px">' + esc(s.description) + '</div><div class="stats-row" style="margin-top:8px"><div class="stat-card" style="padding:6px 10px"><div class="stat-label">' + esc(t("labelAllocation")) + '</div><div class="stat-value" style="font-size:0.9rem">' + (s.allocation_pct * 100).toFixed(0) + '%</div></div><div class="stat-card" style="padding:6px 10px"><div class="stat-label">' + esc(t("labelCapital")) + '</div><div class="stat-value" style="font-size:0.9rem">' + formatNum(s.capital) + '</div></div><div class="stat-card" style="padding:6px 10px"><div class="stat-label">' + esc(display.incomeLabel) + '</div><div class="stat-value" style="font-size:0.9rem">' + formatNum(s.total_premium) + '</div></div><div class="stat-card" style="padding:6px 10px"><div class="stat-label">' + esc(t("labelPnl")) + '</div><div class="stat-value" style="font-size:0.9rem;color:var(--text-dim)">' + (s.total_pnl >= 0 ? "+" : "") + formatNum(s.total_pnl) + '</div></div><div class="stat-card" style="padding:6px 10px"><div class="stat-label">' + esc(t("labelTrades")) + '</div><div class="stat-value" style="font-size:0.9rem">' + s.trade_count + '</div></div></div></div>';
+      return '<div class="stat-card" style="margin-bottom:12px"><div style="display:flex;justify-content:space-between;align-items:center"><div><span style="font-size:1.1rem">' + display.icon + '</span> <strong>' + esc(s.name) + '</strong> <span class="badge ' + badge + '" style="margin-left:8px">' + esc(statusText) + '</span>' + reportingBadge + '</div><div style="display:flex;gap:8px">' + (isAdmin ? '<button class="btn-sm" data-sid="' + esc(s.id) + '" data-action="' + toggleAction + '" aria-label="' + esc(toggleLabel) + " " + esc(s.name) + '">' + esc(toggleLabel) + '</button>' : '') + (isAdmin && enabled ? '<button class="btn-primary" data-sid="' + esc(s.id) + '" data-run="1" aria-label="' + esc(t("manualRun")) + " " + esc(s.name) + '">' + esc(t("manualRun")) + '</button>' : '') + '</div></div><div style="color:var(--text-dim);font-size:0.8rem;margin-top:6px">' + esc(s.description) + '</div>' + reportingNote + '<div class="stats-row" style="margin-top:8px"><div class="stat-card" style="padding:6px 10px"><div class="stat-label">' + esc(t("labelAllocation")) + '</div><div class="stat-value" style="font-size:0.9rem">' + (s.allocation_pct * 100).toFixed(0) + '%</div></div><div class="stat-card" style="padding:6px 10px"><div class="stat-label">' + esc(t("labelCapital")) + '</div><div class="stat-value" style="font-size:0.9rem">' + formatNum(s.capital) + '</div></div><div class="stat-card" style="padding:6px 10px"><div class="stat-label">' + esc(display.incomeLabel) + '</div><div class="stat-value" style="font-size:0.9rem">' + formatNum(s.total_premium) + '</div></div><div class="stat-card" style="padding:6px 10px"><div class="stat-label">' + esc(t("labelPnl")) + '</div><div class="stat-value" style="font-size:0.9rem;color:var(--text-dim)">' + (s.total_pnl >= 0 ? "+" : "") + formatNum(s.total_pnl) + '</div></div><div class="stat-card" style="padding:6px 10px"><div class="stat-label">' + esc(t("labelTrades")) + '</div><div class="stat-value" style="font-size:0.9rem">' + s.trade_count + '</div></div></div></div>';
     }).join("");
 
     container.querySelectorAll("button[data-action]").forEach(function(btn) {
       btn.addEventListener("click", async function() {
         try {
-          var result = await api("/api/alpha/strategies/" + btn.dataset.sid + "/toggle", {
+          var result = await api(withPortfolio("/api/alpha/strategies/" + btn.dataset.sid + "/toggle"), {
             method: "POST",
             body: JSON.stringify({ action: btn.dataset.action }),
           });
@@ -1060,7 +1082,7 @@ async function loadAlpha() {
     container.querySelectorAll("button[data-run]").forEach(function(btn) {
       btn.addEventListener("click", async function() {
         try {
-          var result = await api("/api/alpha/strategies/" + btn.dataset.sid + "/run", { method: "POST" });
+          var result = await api(withPortfolio("/api/alpha/strategies/" + btn.dataset.sid + "/run"), { method: "POST" });
           showToast(t("manualRun") + " ✓", "success");
           loadAlpha();
           loadAlphaTransactions(btn.dataset.sid);
@@ -1068,7 +1090,7 @@ async function loadAlpha() {
       });
     });
 
-    loadArenaLeaderboard();
+    loadArenaLeaderboard(strategies);
     if (strategies.length) {
       txSelect.value = strategies[0].id;
       loadAlphaTransactions(strategies[0].id);
@@ -1081,7 +1103,7 @@ async function loadAlpha() {
 async function loadAlphaTransactions(strategyId) {
   if (!isAuthed()) return;
   try {
-    var txs = await api("/api/alpha/strategies/" + strategyId + "/transactions?limit=20");
+    var txs = await api(withPortfolio("/api/alpha/strategies/" + strategyId + "/transactions?limit=20"));
     var tbody = document.getElementById("alpha-tx-body");
     if (!txs.length) {
       tbody.innerHTML = emptyRowHTML(9, "noAlphaTx");
@@ -1096,13 +1118,17 @@ async function loadAlphaTransactions(strategyId) {
   }
 }
 
-async function loadArenaLeaderboard() {
+async function loadArenaLeaderboard(strategies) {
   if (!isAuthed()) return;
   try {
-    var board = await api("/api/alpha/arena/leaderboard");
+    var board = await api(withPortfolio("/api/alpha/arena/leaderboard"));
     var tbody = document.getElementById("arena-board-body");
+    var eligibleCount = (strategies || []).filter(function(item) { return item.formal_reporting_eligible; }).length;
     if (!board.length) {
-      tbody.innerHTML = emptyRowHTML(9, "noLeaderboard");
+      tbody.innerHTML = emptyRowHTML(9, eligibleCount ? "noLeaderboard" : "alphaFormalEvalBlocked");
+      if (!eligibleCount) {
+        tbody.innerHTML += '<tr><td colspan="9"><div class="empty-state-hint">' + esc(t("alphaFormalOnlyLeaderboard")) + '</div></td></tr>';
+      }
       return;
     }
     tbody.innerHTML = board.map(function(b) {
@@ -1112,6 +1138,121 @@ async function loadArenaLeaderboard() {
   } catch (err) {
     console.error("Leaderboard load error:", err);
   }
+}
+
+function renderAlphaLedger(ledger, isAdmin) {
+  var summary = document.getElementById("alpha-ledger-summary");
+  var withdrawBtn = document.getElementById("btn-alpha-withdraw-request");
+  var manualInBtn = document.getElementById("btn-alpha-manual-in");
+  var manualOutBtn = document.getElementById("btn-alpha-manual-out");
+  withdrawBtn.hidden = !isAdmin;
+  manualInBtn.hidden = !isAdmin;
+  manualOutBtn.hidden = !isAdmin;
+
+  summary.innerHTML =
+    '<div class="stat-card"><div class="stat-label">' + esc(t("alphaCashBalance")) + '</div><div class="stat-value">$' + formatNum(ledger.cash_balance) + '</div></div>' +
+    '<div class="stat-card"><div class="stat-label">' + esc(t("alphaInflows")) + '</div><div class="stat-value">$' + formatNum(ledger.total_inflows) + '</div></div>' +
+    '<div class="stat-card"><div class="stat-label">' + esc(t("alphaOutflows")) + '</div><div class="stat-value">$' + formatNum(ledger.total_outflows) + '</div></div>' +
+    '<div class="stat-card"><div class="stat-label">' + esc(t("alphaLastAdjust")) + '</div><div class="stat-value alpha-note-value">' + esc(ledger.last_manual_adjustment || "--") + '</div></div>';
+}
+
+async function loadAlphaLedgerEntries() {
+  if (!isAuthed()) return;
+  try {
+    var list = await api(withPortfolio("/api/alpha/ledger/entries?limit=10"));
+    var tbody = document.getElementById("alpha-ledger-entries-body");
+    if (!list.length) {
+      tbody.innerHTML = emptyRowHTML(6, "alphaNoLedgerEntries");
+      return;
+    }
+
+    tbody.innerHTML = list.map(function(entry) {
+      return '<tr>' +
+        '<td>' + esc((entry.created_at || "").slice(0, 10) || "-") + '</td>' +
+        '<td><span class="badge ' + (entry.direction === "IN" ? "badge-approved" : "badge-rejected") + '">' + esc(entry.direction === "IN" ? t("alphaDirectionIn") : t("alphaDirectionOut")) + '</span></td>' +
+        '<td>' + (entry.direction === "IN" ? "+" : "-") + '$' + formatNum(entry.amount) + '</td>' +
+        '<td>$' + formatNum(entry.balance_after) + '</td>' +
+        '<td>' + esc(entry.note || "") + '</td>' +
+        '<td>' + esc(entry.actor || "-") + '</td>' +
+      '</tr>';
+    }).join("");
+  } catch (err) {
+    console.error("Alpha ledger entries load error:", err);
+  }
+}
+
+function alphaWithdrawalBadgeClass(status) {
+  if (status === "PENDING_MANUAL") return "badge-pending";
+  if (status === "HANDLED") return "badge-approved";
+  if (status === "REJECTED") return "badge-rejected";
+  return "badge-expired";
+}
+
+function alphaWithdrawalStatusText(status) {
+  if (status === "PENDING_MANUAL") return t("alphaStatusPending");
+  if (status === "HANDLED") return t("alphaStatusHandled");
+  if (status === "REJECTED") return t("alphaStatusRejected");
+  if (status === "CANCELLED") return t("alphaStatusCancelled");
+  return status;
+}
+
+async function loadAlphaWithdrawalRequests() {
+  if (!isAuthed()) return;
+  try {
+    var status = document.getElementById("alpha-withdraw-status-filter").value;
+    var path = "/api/alpha/ledger/withdrawals?limit=50" + (status ? "&status=" + encodeURIComponent(status) : "");
+    var list = await api(withPortfolio(path));
+    var tbody = document.getElementById("alpha-withdrawals-body");
+    var isAdmin = currentUser.role === "admin";
+
+    if (!list.length) {
+      tbody.innerHTML = emptyRowHTML(7, "alphaNoWithdrawRequests");
+      return;
+    }
+
+    tbody.innerHTML = list.map(function(item) {
+      var canHandle = isAdmin && item.status === "PENDING_MANUAL";
+      return '<tr>' +
+        '<td>' + esc(item.id) + '</td>' +
+        '<td>$' + formatNum(item.amount) + '</td>' +
+        '<td>' + esc(item.reason) + '</td>' +
+        '<td>' + esc(item.requester) + '</td>' +
+        '<td><span class="badge ' + alphaWithdrawalBadgeClass(item.status) + '">' + esc(alphaWithdrawalStatusText(item.status)) + '</span></td>' +
+        '<td>' + esc((item.created_at || "").slice(0, 10) || "-") + '</td>' +
+        '<td>' + (canHandle ? '<button class="btn-sm" data-alpha-handle="' + esc(item.id) + '">' + esc(t("alphaHandleBtn")) + '</button>' : '<span class="text-dim">-</span>') + '</td>' +
+      '</tr>';
+    }).join("");
+
+    tbody.querySelectorAll("button[data-alpha-handle]").forEach(function(btn) {
+      btn.addEventListener("click", function() {
+        openAlphaHandleForm(btn.dataset.alphaHandle);
+      });
+    });
+  } catch (err) {
+    console.error("Alpha withdrawal requests load error:", err);
+  }
+}
+
+async function openAlphaHandleForm(requestId) {
+  try {
+    var request = await api(withPortfolio("/api/alpha/ledger/withdrawals/" + requestId));
+    currentAlphaHandleRequestId = request.id;
+    document.getElementById("alpha-handle-request-id").textContent = "#" + request.id;
+    document.getElementById("alpha-handle-status").value = "HANDLED";
+    document.getElementById("alpha-handle-note").value = request.handled_note || "";
+    document.getElementById("alpha-handle-ref").value = request.external_reference || "";
+    document.getElementById("alpha-withdraw-handle-box").hidden = false;
+  } catch (err) {
+    showToast(err.message, "error");
+  }
+}
+
+function closeAlphaHandleForm() {
+  currentAlphaHandleRequestId = null;
+  document.getElementById("alpha-withdraw-handle-box").hidden = true;
+  document.getElementById("alpha-handle-request-id").textContent = "";
+  document.getElementById("alpha-withdraw-handle-form").reset();
+  document.getElementById("alpha-handle-note").classList.remove("input-error");
 }
 
 // ── 家族月报 ───────────────────────────────────────
@@ -1269,7 +1410,7 @@ document.getElementById("btn-gen-report").addEventListener("click", async functi
 document.getElementById("btn-arena-run-all").addEventListener("click", async function() {
   if (!isAuthed()) return;
   try {
-    var result = await api("/api/alpha/arena/run-all", { method: "POST" });
+    var result = await api(withPortfolio("/api/alpha/arena/run-all"), { method: "POST" });
     showToast(t("ranStrategies", { n: result.strategies_run }), "success");
     loadAlpha();
   } catch (err) {
@@ -1280,7 +1421,7 @@ document.getElementById("btn-arena-run-all").addEventListener("click", async fun
 document.getElementById("btn-arena-evaluate").addEventListener("click", async function() {
   if (!isAuthed()) return;
   try {
-    var result = await api("/api/alpha/arena/evaluate", { method: "POST" });
+    var result = await api(withPortfolio("/api/alpha/arena/evaluate"), { method: "POST" });
     document.getElementById("eval-result").hidden = false;
     document.getElementById("eval-report").textContent = JSON.stringify(result, null, 2);
     showToast(t("evalResultTitle") + " ✓", "success");
@@ -1466,6 +1607,156 @@ document.getElementById("btn-dismiss-task").addEventListener("click", async func
     await api("/api/data/update/dismiss", { method: "POST" });
     document.getElementById("data-task-box").hidden = true;
   } catch (e) { /* ignore */ }
+});
+
+document.getElementById("btn-alpha-withdraw-request").addEventListener("click", function() {
+  document.getElementById("alpha-withdraw-form-box").hidden = false;
+});
+
+document.getElementById("btn-alpha-manual-in").addEventListener("click", function() {
+  document.getElementById("alpha-entry-direction").value = "IN";
+  document.getElementById("alpha-ledger-entry-form-box").hidden = false;
+});
+
+document.getElementById("btn-alpha-manual-out").addEventListener("click", function() {
+  document.getElementById("alpha-entry-direction").value = "OUT";
+  document.getElementById("alpha-ledger-entry-form-box").hidden = false;
+});
+
+document.getElementById("btn-alpha-withdraw-cancel").addEventListener("click", function() {
+  document.getElementById("alpha-withdraw-form-box").hidden = true;
+  document.getElementById("alpha-withdraw-form").reset();
+});
+
+document.getElementById("btn-alpha-entry-cancel").addEventListener("click", function() {
+  document.getElementById("alpha-ledger-entry-form-box").hidden = true;
+  document.getElementById("alpha-ledger-entry-form").reset();
+});
+
+document.getElementById("alpha-ledger-entry-form").addEventListener("submit", async function(e) {
+  e.preventDefault();
+  if (!isAuthed()) return;
+
+  var directionEl = document.getElementById("alpha-entry-direction");
+  var amountEl = document.getElementById("alpha-entry-amount");
+  var noteEl = document.getElementById("alpha-entry-note");
+  var refEl = document.getElementById("alpha-entry-ref");
+  var requestIdEl = document.getElementById("alpha-entry-request-id");
+
+  if (!amountEl.value || parseFloat(amountEl.value) <= 0) {
+    amountEl.classList.add("input-error");
+    amountEl.focus();
+    return;
+  }
+  if (!noteEl.value.trim()) {
+    noteEl.classList.add("input-error");
+    noteEl.focus();
+    return;
+  }
+
+  amountEl.classList.remove("input-error");
+  noteEl.classList.remove("input-error");
+
+  try {
+    var result = await api(withPortfolio("/api/alpha/ledger/entries"), {
+      method: "POST",
+      body: JSON.stringify({
+        direction: directionEl.value,
+        amount: parseFloat(amountEl.value),
+        note: noteEl.value.trim(),
+        external_reference: refEl.value.trim(),
+        related_request_id: requestIdEl.value.trim(),
+      }),
+    });
+    showToast(t("alphaEntrySuccess"), "success");
+    document.getElementById("alpha-ledger-entry-form-box").hidden = true;
+    document.getElementById("alpha-ledger-entry-form").reset();
+    loadAlpha();
+    loadAlphaLedgerEntries();
+  } catch (err) {
+    showToast(err.message, "error");
+  }
+});
+
+document.getElementById("alpha-withdraw-form").addEventListener("submit", async function(e) {
+  e.preventDefault();
+  if (!isAuthed()) return;
+
+  var amountEl = document.getElementById("alpha-w-amount");
+  var reasonEl = document.getElementById("alpha-w-reason");
+  if (!amountEl.value || parseFloat(amountEl.value) <= 0) {
+    amountEl.classList.add("input-error");
+    amountEl.focus();
+    return;
+  }
+  if (!reasonEl.value.trim()) {
+    reasonEl.classList.add("input-error");
+    reasonEl.focus();
+    return;
+  }
+
+  amountEl.classList.remove("input-error");
+  reasonEl.classList.remove("input-error");
+
+  try {
+    var result = await api(withPortfolio("/api/alpha/ledger/withdraw"), {
+      method: "POST",
+      body: JSON.stringify({
+        amount: parseFloat(amountEl.value),
+        reason: reasonEl.value.trim(),
+      }),
+    });
+    showToast(result.message, "success");
+    document.getElementById("alpha-withdraw-form-box").hidden = true;
+    document.getElementById("alpha-withdraw-form").reset();
+    loadAlpha();
+    loadAlphaLedgerEntries();
+    loadAlphaWithdrawalRequests();
+  } catch (err) {
+    showToast(err.message, "error");
+  }
+});
+
+document.getElementById("alpha-withdraw-status-filter").addEventListener("change", function() {
+  loadAlphaWithdrawalRequests();
+});
+
+document.getElementById("btn-alpha-handle-cancel").addEventListener("click", function() {
+  closeAlphaHandleForm();
+});
+
+document.getElementById("alpha-withdraw-handle-form").addEventListener("submit", async function(e) {
+  e.preventDefault();
+  if (!isAuthed() || !currentAlphaHandleRequestId) return;
+
+  var noteEl = document.getElementById("alpha-handle-note");
+  var refEl = document.getElementById("alpha-handle-ref");
+  var statusEl = document.getElementById("alpha-handle-status");
+
+  if (statusEl.value === "HANDLED" && !noteEl.value.trim() && !refEl.value.trim()) {
+    noteEl.classList.add("input-error");
+    noteEl.focus();
+    return;
+  }
+  noteEl.classList.remove("input-error");
+
+  try {
+    var result = await api(withPortfolio("/api/alpha/ledger/withdrawals/" + currentAlphaHandleRequestId + "/status"), {
+      method: "POST",
+      body: JSON.stringify({
+        status: statusEl.value,
+        note: noteEl.value.trim(),
+        external_reference: refEl.value.trim(),
+      }),
+    });
+    showToast(t("alphaHandleSuccess"), "success");
+    closeAlphaHandleForm();
+    loadAlphaWithdrawalRequests();
+    loadAlpha();
+    loadAlphaLedgerEntries();
+  } catch (err) {
+    showToast(err.message, "error");
+  }
 });
 
 // ── 初始化 ─────────────────────────────────────────

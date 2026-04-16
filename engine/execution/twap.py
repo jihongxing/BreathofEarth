@@ -22,7 +22,7 @@ from engine.execution.base import (
     BaseExecutor, TradeOrder, ExecutionResult,
     OrderSide, OrderStatus,
 )
-from engine.config import FEE_RATE
+from engine.config import ASSETS, FEE_RATE
 
 logger = logging.getLogger("xirang.execution.twap")
 
@@ -39,6 +39,7 @@ class TWAPExecutor(BaseExecutor):
     def __init__(
         self,
         market_data_service=None,
+        assets=None,
         time_window_minutes: int = 120,
         num_slices: int = 20,
         min_order_size: float = 500000.0,
@@ -53,6 +54,7 @@ class TWAPExecutor(BaseExecutor):
             simulate: 是否模拟执行（True=仿真，False=真实执行）
         """
         self.market = market_data_service
+        self.assets = assets or ASSETS
         self.time_window = time_window_minutes
         self.num_slices = num_slices
         self.min_order_size = min_order_size
@@ -68,11 +70,9 @@ class TWAPExecutor(BaseExecutor):
         """
         计算需要买卖的具体股数（与 PaperExecutor 相同）。
         """
-        from engine.config import ASSETS
-        
         orders = []
 
-        for i, asset in enumerate(ASSETS):
+        for i, asset in enumerate(self.assets):
             target_amount = total_nav * target_weights[i]
             current_amount = current_positions.get(asset, 0.0)
             diff = target_amount - current_amount
@@ -275,6 +275,5 @@ class TWAPExecutor(BaseExecutor):
         if self.market is None:
             return {}
 
-        from engine.config import ASSETS
         prices = self.market.fetch_latest(lookback_days=5)
-        return {asset: float(prices[asset].iloc[-1]) for asset in ASSETS}
+        return {asset: float(prices[asset].iloc[-1]) for asset in self.assets}

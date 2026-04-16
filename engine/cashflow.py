@@ -29,7 +29,7 @@ from db.database import Database
 from engine.config import (
     PORTFOLIOS, WEIGHTS_IDLE, FEE_RATE,
     LAYER_TARGET_CORE, LAYER_TARGET_STABILITY,
-    LAYER_MIN_STABILITY, LAYER_MAX_STABILITY,
+    LAYER_MIN_STABILITY, LAYER_MAX_STABILITY, LAYER_TARGET_ALPHA,
 )
 
 logger = logging.getLogger("xirang.cashflow")
@@ -573,10 +573,13 @@ class CashflowEngine:
         except ValueError:
             return CashflowResult("ERROR", f"组合 {portfolio_id} 不存在")
 
+        alpha_account = self.db.get_alpha_account(portfolio_id)
         positions = _parse_positions(portfolio["positions"])
         stability = float(portfolio.get("stability_balance", 0.0))
+        alpha_balance = float(alpha_account.get("cash_balance", 0.0))
         core_sum = sum(positions)
         nav = self._get_total_nav(core_sum, stability)
+        family_nav = nav + alpha_balance
 
         pf_config = PORTFOLIOS[portfolio_id]
         assets = pf_config["assets"]
@@ -594,17 +597,27 @@ class CashflowEngine:
         return CashflowResult(
             "SUCCESS", "三层状态",
             nav=round(nav, 2),
+            family_nav=round(family_nav, 2),
             core=dict(
                 balance=round(core_sum, 2),
-                ratio=round(core_sum / nav, 4) if nav > 0 else 0,
+                ratio=round(core_sum / family_nav, 4) if family_nav > 0 else 0,
                 target=LAYER_TARGET_CORE,
                 assets=core_detail,
             ),
             stability=dict(
                 balance=round(stability, 2),
-                ratio=round(stability / nav, 4) if nav > 0 else 0,
+                ratio=round(stability / family_nav, 4) if family_nav > 0 else 0,
                 target=LAYER_TARGET_STABILITY,
                 min_safe=LAYER_MIN_STABILITY,
+            ),
+            alpha=dict(
+                balance=round(alpha_balance, 2),
+                ratio=round(alpha_balance / family_nav, 4) if family_nav > 0 else 0,
+                target=LAYER_TARGET_ALPHA,
+                max_target=LAYER_TARGET_ALPHA,
+                total_inflows=round(float(alpha_account.get("total_inflows", 0.0)), 2),
+                total_outflows=round(float(alpha_account.get("total_outflows", 0.0)), 2),
+                last_manual_adjustment=alpha_account.get("last_manual_adjustment"),
             ),
             state=portfolio["state"],
         )

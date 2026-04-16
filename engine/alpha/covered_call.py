@@ -8,7 +8,7 @@
 
 风险：
 - 如果 SPY 大涨超过行权价，收益被封顶（Cap Risk）
-- 用 10% 资金做沙盒实验，不影响核心组合
+ - 只动用 Alpha 独立账本内的分配资金，不影响 Core/Stability
 
 触发条件：
 - 策略状态为 ENABLED（手动开启）
@@ -98,7 +98,7 @@ class CoveredCallStrategy(AlphaStrategy):
     IMPLIED_VOL = 0.18       # 假设隐含波动率
     CONTRACTS_PER_100 = 100  # 每张合约对应 100 股
 
-    def run(self, portfolio_id: str, current_date: str, spy_price: float, nav: float) -> dict:
+    def run(self, portfolio_id: str, current_date: str, spy_price: float) -> dict:
         """
         执行备兑期权策略。
 
@@ -108,26 +108,27 @@ class CoveredCallStrategy(AlphaStrategy):
         if not self.is_enabled(portfolio_id):
             return {"action": "SKIP", "reason": "策略未启用"}
 
-        strategy = self.db.get_strategy(self.STRATEGY_ID)
-        allocation_pct = strategy.get("allocation_pct", self.DEFAULT_ALLOCATION)
-        capital = nav * allocation_pct
+        strategy, alpha_account, capital = self.get_allocated_capital(portfolio_id)
+        alpha_balance = float(alpha_account.get("cash_balance", 0.0))
+        if alpha_balance <= 0:
+            return {"action": "SKIP", "reason": "Alpha 独立账本余额为 0"}
 
         # 检查是否是月初（日期 <= 5）
         dt = datetime.strptime(current_date, "%Y-%m-%d")
         if dt.day > 5:
             # 非月初：只记录快照
-            self._save_daily_snapshot(current_date, capital, spy_price, strategy)
+            self._save_daily_snapshot(portfolio_id, current_date, capital, spy_price, strategy)
             return {"action": "HOLD", "reason": "非月初，等待下次滚动"}
 
         # 检查本月是否已滚动过
-        recent_txs = self.db.get_alpha_transactions(self.STRATEGY_ID, limit=1)
+        recent_txs = self.db.get_alpha_transactions(self.STRATEGY_ID, portfolio_id=portfolio_id, limit=1)
         if recent_txs and recent_txs[0]["date"][:7] == current_date[:7]:
             return {"action": "SKIP", "reason": "本月已完成滚动"}
 
         # 执行 monthly roll
-        return self._monthly_roll(portfolio_id, current_date, spy_price, capital)
+        return self._monthly_roll(portfolio_id, current_date, spy_price, capital, alpha_balance)
 
-    def _monthly_roll(self, portfolio_id: str, current_date: str, spy_price: float, capital: float) -> dict:
+    def _monthly_roll(self, portfolio_id: str, current_date: str, spy_price: float, capital: float, alpha_balance: float) -> dict:
         """月度滚动：结算旧期权 + 卖出新期权"""
 
         # 1. 结算上月期权（如果有）
@@ -167,7 +168,7 @@ class CoveredCallStrategy(AlphaStrategy):
         )
 
         # 6. 更新策略资金
-        self.db.upsert_strategy(self.STRATEGY_ID, capital=capital)
+        self.db.upsert_strategy(self.STRATEGY_ID, portfolio_id=portfolio_id, capital=capital)
 
         logger.info(
             f"备兑期权: SELL {contracts}x SPY {strike} Call @ {expiry}, "
@@ -183,6 +184,7 @@ class CoveredCallStrategy(AlphaStrategy):
             "total_premium": round(total_premium, 2),
             "spy_price": spy_price,
             "capital": round(capital, 2),
+            "alpha_balance": round(alpha_balance, 2),
         }
 
         if settle_result:
@@ -192,7 +194,7 @@ class CoveredCallStrategy(AlphaStrategy):
 
     def _settle_expiring(self, portfolio_id: str, current_date: str, spy_price: float) -> dict:
         """结算到期的期权"""
-        recent_txs = self.db.get_alpha_transactions(self.STRATEGY_ID, limit=5)
+        recent_txs = self.db.get_alpha_transactions(self.STRATEGY_ID, portfolio_id=portfolio_id, limit=5)
         sell_calls = [t for t in recent_txs if t["action"] == "SELL_CALL" and t.get("expiry")]
 
         if not sell_calls:
@@ -237,7 +239,7 @@ class CoveredCallStrategy(AlphaStrategy):
         logger.info(f"备兑期权结算: {action} | {detail}")
         return {"action": action, "pnl": round(pnl, 2), "detail": detail}
 
-    def _save_daily_snapshot(self, current_date: str, capital: float, spy_price: float, strategy: dict):
+    def _save_daily_snapshot(self, portfolio_id: str, current_date: str, capital: float, spy_price: float, strategy: dict):
         """保存每日快照（用于绩效评估）"""
         # 简化：用 capital + total_pnl 作为 nav
         total_pnl = strategy.get("total_pnl", 0)
@@ -247,6 +249,7 @@ class CoveredCallStrategy(AlphaStrategy):
 
         self.db.save_alpha_snapshot(
             strategy_id=self.STRATEGY_ID,
+            portfolio_id=portfolio_id,
             date=current_date,
             capital=capital,
             nav=nav,

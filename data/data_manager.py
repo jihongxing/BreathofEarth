@@ -108,6 +108,7 @@ LIVE_CONFIGS = {
 
 # ── 限流控制器 ────────────────────────────────────────
 
+
 class RateLimiter:
     """
     统一限流控制器。
@@ -156,7 +157,9 @@ class RateLimiter:
         elapsed = now - self._last_request_time
         if self._consecutive_failures > 0:
             # 限流退避：30s 起步，指数增长
-            backoff = min(self.max_backoff, 30.0 * (2 ** (self._consecutive_failures - 1)))
+            backoff = min(
+                self.max_backoff, 30.0 * (2 ** (self._consecutive_failures - 1))
+            )
             logger.info(
                 f"限流退避: 等待 {backoff:.0f}s (连续失败 {self._consecutive_failures} 次)"
             )
@@ -189,17 +192,24 @@ class RateLimiter:
 
 # ── 辅助函数 ─────────────────────────────────────────
 
+
 def _is_rate_limit_error(e: Exception) -> bool:
     """判断异常是否是限流错误。"""
     msg = str(e).lower()
-    return any(kw in msg for kw in ["rate limit", "too many requests", "429", "ratelimit"])
+    return any(
+        kw in msg for kw in ["rate limit", "too many requests", "429", "ratelimit"]
+    )
 
 
 def _clear_proxy():
     """临时清除代理环境变量，返回备份。"""
     keys = [
-        "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
-        "http_proxy", "https_proxy", "all_proxy",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
     ]
     saved = {}
     for k in keys:
@@ -215,6 +225,7 @@ def _restore_proxy(saved: dict):
 
 
 # ── 数据源适配器 ──────────────────────────────────────
+
 
 class DataSource:
     """
@@ -246,12 +257,10 @@ class DataSource:
                 try:
                     return self._fetch_akshare_cn(ticker, start, end)
                 except Exception as e:
-                    errors.append(f"akshare_cn[{attempt+1}]: {e}")
+                    errors.append(f"akshare_cn[{attempt + 1}]: {e}")
                     if _is_rate_limit_error(e):
                         self.rl.report_failure(is_rate_limit=True)
-            raise RuntimeError(
-                f"{ticker} 所有数据源失败:\n  " + "\n  ".join(errors)
-            )
+            raise RuntimeError(f"{ticker} 所有数据源失败:\n  " + "\n  ".join(errors))
         else:
             # 美股标的：akshare 优先，yfinance 最终 fallback
             errors = []
@@ -260,7 +269,7 @@ class DataSource:
                 try:
                     return self._fetch_akshare_us(ticker, start, end)
                 except Exception as e:
-                    errors.append(f"akshare_us[{attempt+1}]: {e}")
+                    errors.append(f"akshare_us[{attempt + 1}]: {e}")
             # 最终 fallback：yfinance（仅1次尝试，失败就放弃）
             try:
                 logger.info(f"    akshare 全部失败，尝试 yfinance fallback...")
@@ -269,9 +278,7 @@ class DataSource:
                 errors.append(f"yfinance_fallback: {e}")
                 if _is_rate_limit_error(e):
                     self.rl.report_failure(is_rate_limit=True)
-            raise RuntimeError(
-                f"{ticker} 所有数据源失败:\n  " + "\n  ".join(errors)
-            )
+            raise RuntimeError(f"{ticker} 所有数据源失败:\n  " + "\n  ".join(errors))
 
     def _fetch_yfinance(self, ticker: str, start: str, end: str) -> pd.Series:
         """通过 yfinance 拉取数据（最终 fallback，仅在 akshare 全部失败时使用）。"""
@@ -281,8 +288,12 @@ class DataSource:
         saved = _clear_proxy()
         try:
             df = yf.download(
-                ticker, start=start, end=end,
-                auto_adjust=False, progress=False, threads=False,
+                ticker,
+                start=start,
+                end=end,
+                auto_adjust=False,
+                progress=False,
+                threads=False,
             )
         finally:
             _restore_proxy(saved)
@@ -340,8 +351,11 @@ class DataSource:
             s_fmt = pd.Timestamp(start).strftime("%Y%m%d")
             e_fmt = pd.Timestamp(end).strftime("%Y%m%d")
             df = ak.fund_etf_hist_em(
-                symbol=code, period="daily",
-                start_date=s_fmt, end_date=e_fmt, adjust="qfq",
+                symbol=code,
+                period="daily",
+                start_date=s_fmt,
+                end_date=e_fmt,
+                adjust="qfq",
             )
             if df.empty:
                 raise RuntimeError(f"akshare 返回空数据: {ticker}")
@@ -378,10 +392,14 @@ class DataSource:
                 if df is not None and not df.empty:
                     df["date"] = pd.to_datetime(df["date"])
                     df = df.set_index("date").sort_index()
-                    s = df["close"][
-                        (df.index >= pd.Timestamp(start))
-                        & (df.index <= pd.Timestamp(end))
-                    ].astype(float).dropna()
+                    s = (
+                        df["close"][
+                            (df.index >= pd.Timestamp(start))
+                            & (df.index <= pd.Timestamp(end))
+                        ]
+                        .astype(float)
+                        .dropna()
+                    )
                     if not s.empty:
                         s.name = ticker
                         s.index.name = "date"
@@ -394,7 +412,8 @@ class DataSource:
             # 方法2: stock_us_hist（东方财富源，网络不稳定时可能超时）
             try:
                 df = ak.stock_us_hist(
-                    symbol=ticker, period="daily",
+                    symbol=ticker,
+                    period="daily",
                     start_date=start.replace("-", ""),
                     end_date=end.replace("-", ""),
                     adjust="qfq",
@@ -403,7 +422,12 @@ class DataSource:
                     date_col = "日期" if "日期" in df.columns else "date"
                     close_col = "收盘" if "收盘" in df.columns else "close"
                     df[date_col] = pd.to_datetime(df[date_col])
-                    s = df.set_index(date_col).sort_index()[close_col].astype(float).dropna()
+                    s = (
+                        df.set_index(date_col)
+                        .sort_index()[close_col]
+                        .astype(float)
+                        .dropna()
+                    )
                     if not s.empty:
                         s.name = ticker
                         s.index.name = "date"
@@ -422,6 +446,7 @@ class DataSource:
 
 # ── 数据管理器 ────────────────────────────────────────
 
+
 class DataManager:
     """
     统一数据管理器。
@@ -435,9 +460,7 @@ class DataManager:
     """
 
     def __init__(self, min_interval: float = 3.0, max_hourly: int = 60):
-        self.rl = RateLimiter(
-            min_interval=min_interval, max_hourly_requests=max_hourly
-        )
+        self.rl = RateLimiter(min_interval=min_interval, max_hourly_requests=max_hourly)
         self.source = DataSource(self.rl)
         RAW_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -574,7 +597,9 @@ class DataManager:
 
     # ── 增量更新 ──────────────────────────────────────
 
-    def update_ticker(self, ticker: str, start: str, end: str = None) -> Optional[pd.Series]:
+    def update_ticker(
+        self, ticker: str, start: str, end: str = None
+    ) -> Optional[pd.Series]:
         """
         增量更新单个 ticker。
 
@@ -601,11 +626,12 @@ class DataManager:
                 logger.info(f"  {ticker}: 本地已是最新 (截至 {last_date.date()})，跳过")
                 return cached
 
-            # 增量更新
-            inc_start = (last_date - timedelta(days=5)).strftime("%Y-%m-%d")
-            logger.info(
-                f"  {ticker}: 增量更新 {inc_start} → {end} (本地 {len(cached)} 行)"
-            )
+        # 增量更新
+        inc_start = (last_date - timedelta(days=5)).strftime("%Y-%m-%d")
+        logger.info(f"  {ticker}: 增量更新 {inc_start} → {end} (本地 {len(cached)} 行)")
+        # 添加网络重试机制
+        max_retries = 3
+        for retry in range(max_retries):
             try:
                 new_data = self.source.fetch_ticker(ticker, inc_start, end)
                 merged = pd.concat([cached, new_data]).sort_index()
@@ -615,19 +641,32 @@ class DataManager:
                 logger.info(f"  {ticker}: ✓ 更新完成 ({len(merged)} 行)")
                 return merged
             except Exception as e:
-                logger.warning(f"  {ticker}: ✗ 增量更新失败 ({e})，使用本地缓存")
-                return cached[cached.index >= pd.Timestamp(start)]
+                if retry == max_retries - 1:  # 最后一次重试也失败
+                    logger.warning(f"  {ticker}: ✗ 增量更新失败 ({e})，使用本地缓存")
+                    return cached[cached.index >= pd.Timestamp(start)]
+                logger.warning(
+                    f"  {ticker}: 网络错误，{retry + 1}/{max_retries} 次重试中: {e}"
+                )
+                time.sleep(10 * (retry + 1))  # 递增等待时间
 
         # 无缓存，全量下载
         logger.info(f"  {ticker}: 首次下载 {start} → {end}")
-        try:
-            data = self.source.fetch_ticker(ticker, start, end)
-            self._save_raw(data, raw_path)
-            logger.info(f"  {ticker}: ✓ 下载完成 ({len(data)} 行)")
-            return data
-        except Exception as e:
-            logger.error(f"  {ticker}: ✗ 下载失败: {e}")
-            return None
+        # 添加网络重试机制
+        max_retries = 3
+        for retry in range(max_retries):
+            try:
+                data = self.source.fetch_ticker(ticker, start, end)
+                self._save_raw(data, raw_path)
+                logger.info(f"  {ticker}: ✓ 下载完成 ({len(data)} 行)")
+                return data
+            except Exception as e:
+                if retry == max_retries - 1:  # 最后一次重试也失败
+                    logger.error(f"  {ticker}: ✗ 下载失败: {e}")
+                    return None
+                logger.warning(
+                    f"  {ticker}: 网络错误，{retry + 1}/{max_retries} 次重试中: {e}"
+                )
+                time.sleep(10 * (retry + 1))  # 递增等待时间
 
     def update_all(self, markets: list[str] = None):
         """
@@ -651,11 +690,11 @@ class DataManager:
                     all_tickers[t] = cfg["start"]
 
         total = len(all_tickers)
-        logger.info(f"\n{'='*50}")
+        logger.info(f"\n{'=' * 50}")
         logger.info(f"息壤数据管理器 - 增量更新")
         logger.info(f"市场: {', '.join(markets)}")
         logger.info(f"Tickers: {total} 个唯一标的")
-        logger.info(f"{'='*50}")
+        logger.info(f"{'=' * 50}")
 
         # 逐个更新（失败跳过）
         ticker_data: dict[str, pd.Series] = {}
@@ -787,7 +826,6 @@ class DataManager:
         # 更新时间戳
         ts_path = DATA_DIR / "last_update.txt"
         ts_path.write_text(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-
 
     # ── 数据状态 ──────────────────────────────────────
 
@@ -932,6 +970,7 @@ class DataManager:
 
 # ── CLI 入口 ──────────────────────────────────────────
 
+
 def main():
     import argparse
 
@@ -942,27 +981,36 @@ def main():
 
     parser = argparse.ArgumentParser(description="息壤数据管理器")
     parser.add_argument(
-        "--update", nargs="*", metavar="MARKET",
+        "--update",
+        nargs="*",
+        metavar="MARKET",
         help="增量更新市场数据（不指定市场则更新全部）",
     )
     parser.add_argument(
-        "--update-live", action="store_true",
+        "--update-live",
+        action="store_true",
         help="更新 live 数据（每日运行用）",
     )
     parser.add_argument(
-        "--bootstrap", action="store_true",
+        "--bootstrap",
+        action="store_true",
         help="从已有 CSV 提取 raw 缓存（首次迁移用）",
     )
     parser.add_argument(
-        "--status", action="store_true",
+        "--status",
+        action="store_true",
         help="查看数据状态",
     )
     parser.add_argument(
-        "--min-interval", type=float, default=3.0,
+        "--min-interval",
+        type=float,
+        default=3.0,
         help="API 请求最小间隔秒数（默认 3.0）",
     )
     parser.add_argument(
-        "--max-hourly", type=int, default=60,
+        "--max-hourly",
+        type=int,
+        default=60,
         help="每小时最大请求数（默认 60）",
     )
     args = parser.parse_args()

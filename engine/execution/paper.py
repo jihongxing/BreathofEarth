@@ -26,12 +26,13 @@ class PaperExecutor(BaseExecutor):
     行为与现有系统完全一致。
     """
 
-    def __init__(self, market_data_service=None):
+    def __init__(self, market_data_service=None, assets=None):
         """
         Args:
             market_data_service: MarketDataService 实例，用于获取价格
         """
         self.market = market_data_service
+        self.assets = assets or ASSETS
 
     def translate_orders(
         self,
@@ -51,7 +52,7 @@ class PaperExecutor(BaseExecutor):
         """
         orders = []
 
-        for i, asset in enumerate(ASSETS):
+        for i, asset in enumerate(self.assets):
             target_amount = total_nav * target_weights[i]
             current_amount = current_positions.get(asset, 0.0)
             diff = target_amount - current_amount
@@ -142,4 +143,4 @@ class PaperExecutor(BaseExecutor):
             return {}
 
         prices = self.market.fetch_latest(lookback_days=5)
-        return {asset: float(prices[asset].iloc[-1]) for asset in ASSETS}
+        return {asset: float(prices[asset].iloc[-1]) for asset in self.assets}
