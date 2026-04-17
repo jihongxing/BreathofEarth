@@ -2,6 +2,51 @@
 
 所有重要变更记录在此。格式遵循 [Keep a Changelog](https://keepachangelog.com/)。
 
+## [Unreleased] - 2026-04-17
+
+### 核心边界收紧
+
+- 明确出金长期原则：系统只允许申请与留痕，不允许自动批准或自动执行
+- 继续拆分 `Core / Stability / Alpha` 边界，Alpha 以独立资金账本运行
+- 启动时强制执行 `validate_config()`，配置不合法时拒绝启动
+
+### 券商接入与观察面板
+
+- 完成 `Broker Sync` 只读同步、对账、历史时间轴、异常持续次数与连续漂移天数展示
+- 将 `Broker Sync / Shadow Run / Core 实盘结果` 接入统一观察面板
+- `daily_runner` 已接入：
+  - 券商同步前置硬闸门
+  - broker sync policy 按中美市场分别配置
+  - 执行白名单矩阵
+  - 执行后对账闭环
+
+### 最小真实交易能力
+
+- `IBKRAdapter` 已具备最小真实交易协议骨架
+  - 下单
+  - 查单
+  - 撤单
+  - reply 确认链处理
+- `FutuAdapter` 已补到同一层级
+  - 下单
+  - 查单
+  - 撤单
+  - 费用查询与回执解析
+- `BrokerExecutor` 已接入最小真实执行主链路
+- 真实交易默认关闭，必须显式开启券商级环境变量
+
+### 执行审计
+
+- 新增执行审计表：`db/schema_broker_execution.sql`
+- 新增 `broker_execution_events` 持久化真实订单提交、状态轮询、回执结果
+- `daily_runner` 会在与主运行同一事务中写入执行审计事件
+
+### 文档同步
+
+- 更新 `docs/13-券商接入主备与沙箱实施方案.md`，标记当前已推进到“最小交易能力边界”
+- 更新 `docs/01/02/03/07/09`，统一当前项目口径
+- 更新根目录 `README.md`，移除过期宣传型回测表述，改为反映当前真实状态
+
 ## [0.4.0] - 2026-04-04
 
 ### Web 前端 & API 服务
