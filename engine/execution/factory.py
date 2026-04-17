@@ -61,7 +61,9 @@ def create_broker_adapter(
         selected_mode = BrokerMode.PAPER if role == "sandbox" else BrokerMode.LIVE
 
     if selected_name in {"paper", "mock", "sandbox"}:
-        return PaperAdapter(market_data_service=market_data_service, assets=assets)
+        adapter = PaperAdapter(market_data_service=market_data_service, assets=assets)
+        adapter.broker_role = role
+        return adapter
 
     adapter_map = {
         "ibkr": IBKRAdapter,
@@ -70,7 +72,9 @@ def create_broker_adapter(
     if selected_name not in adapter_map:
         raise ValueError(f"不支持的券商: {selected_name}")
 
-    return adapter_map[selected_name](mode=selected_mode, assets=assets)
+    adapter = adapter_map[selected_name](mode=selected_mode, assets=assets)
+    adapter.broker_role = role
+    return adapter
 
 
 def create_shadow_runner(market_data_service=None, assets=None, executor: BaseExecutor | None = None) -> ShadowRun:

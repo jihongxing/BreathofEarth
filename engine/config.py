@@ -16,6 +16,21 @@ PORTFOLIOS = {
         "currency": "$",
         "assets": ["SPY", "TLT", "GLD", "SHV"],
         "max_data_lag_days": 4,  # 跨时区 + 周末容忍，超过视为数据过期
+        "broker_sync_policy": {
+            "required_role": "primary",
+            "require_snapshot_cover_market_date": True,
+            "require_reconciliation_cover_market_date": True,
+            "max_snapshot_lag_days": 0,
+            "max_reconciliation_lag_days": 0,
+        },
+        "live_execution_policy": {
+            "enabled": True,  # Phase 3 先放行美股主链路的小额真实执行
+            "allowed_assets": ["SPY", "TLT", "GLD", "SHV"],
+            "allowed_order_sides": ["BUY", "SELL"],
+            "max_single_order_notional": 15000.0,
+            "max_daily_order_count": 4,
+            "max_daily_turnover_ratio": 0.20,
+        },
         "asset_names": {
             "SPY": "标普500",
             "TLT": "长期国债",
@@ -29,6 +44,21 @@ PORTFOLIOS = {
         "currency": "¥",
         "assets": ["510300.SS", "511010.SS", "518880.SS", "MONEY"],
         "max_data_lag_days": 3,  # 周末容忍，超过视为数据过期
+        "broker_sync_policy": {
+            "required_role": "primary",
+            "require_snapshot_cover_market_date": True,
+            "require_reconciliation_cover_market_date": True,
+            "max_snapshot_lag_days": 0,
+            "max_reconciliation_lag_days": 0,
+        },
+        "live_execution_policy": {
+            "enabled": False,  # 中国链路保留到 Phase 4，再进入真实执行白名单
+            "allowed_assets": ["510300.SS", "511010.SS", "518880.SS", "MONEY"],
+            "allowed_order_sides": ["BUY", "SELL"],
+            "max_single_order_notional": 50000.0,
+            "max_daily_order_count": 4,
+            "max_daily_turnover_ratio": 0.20,
+        },
         "asset_names": {
             "510300.SS": "沪深300",
             "511010.SS": "国债ETF",
@@ -159,12 +189,46 @@ def validate_config():
         assert "assets" in pf, f"组合 {pid} 缺少 assets 字段"
         assert "asset_names" in pf, f"组合 {pid} 缺少 asset_names 字段"
         assert "max_data_lag_days" in pf, f"组合 {pid} 缺少 max_data_lag_days 字段"
+        assert "broker_sync_policy" in pf, f"组合 {pid} 缺少 broker_sync_policy 字段"
+        assert "live_execution_policy" in pf, f"组合 {pid} 缺少 live_execution_policy 字段"
 
         assets = pf["assets"]
         assert len(assets) == 4, f"组合 {pid} 必须有 4 个资产，当前: {len(assets)}"
         assert len(assets) == len(set(assets)), f"组合 {pid} 资产列表有重复: {assets}"
         assert 1 <= pf["max_data_lag_days"] <= 7, \
             f"组合 {pid} 的 max_data_lag_days 应在 [1, 7] 范围内，当前: {pf['max_data_lag_days']}"
+
+        broker_sync_policy = pf["broker_sync_policy"]
+        assert isinstance(broker_sync_policy, dict), f"组合 {pid} 的 broker_sync_policy 必须为字典"
+        assert broker_sync_policy.get("required_role") in {"primary", "backup"}, \
+            f"组合 {pid} 的 broker_sync_policy.required_role 必须为 primary 或 backup"
+        assert isinstance(broker_sync_policy.get("require_snapshot_cover_market_date"), bool), \
+            f"组合 {pid} 的 broker_sync_policy.require_snapshot_cover_market_date 必须为布尔值"
+        assert isinstance(broker_sync_policy.get("require_reconciliation_cover_market_date"), bool), \
+            f"组合 {pid} 的 broker_sync_policy.require_reconciliation_cover_market_date 必须为布尔值"
+        assert 0 <= int(broker_sync_policy.get("max_snapshot_lag_days", -1)) <= 7, \
+            f"组合 {pid} 的 broker_sync_policy.max_snapshot_lag_days 应在 [0, 7] 范围内"
+        assert 0 <= int(broker_sync_policy.get("max_reconciliation_lag_days", -1)) <= 7, \
+            f"组合 {pid} 的 broker_sync_policy.max_reconciliation_lag_days 应在 [0, 7] 范围内"
+
+        live_execution_policy = pf["live_execution_policy"]
+        assert isinstance(live_execution_policy, dict), f"组合 {pid} 的 live_execution_policy 必须为字典"
+        assert isinstance(live_execution_policy.get("enabled"), bool), \
+            f"组合 {pid} 的 live_execution_policy.enabled 必须为布尔值"
+        assert isinstance(live_execution_policy.get("allowed_assets"), list), \
+            f"组合 {pid} 的 live_execution_policy.allowed_assets 必须为列表"
+        assert set(live_execution_policy.get("allowed_assets", [])) <= set(assets), \
+            f"组合 {pid} 的 live_execution_policy.allowed_assets 必须是 assets 的子集"
+        assert isinstance(live_execution_policy.get("allowed_order_sides"), list), \
+            f"组合 {pid} 的 live_execution_policy.allowed_order_sides 必须为列表"
+        assert set(live_execution_policy.get("allowed_order_sides", [])) <= {"BUY", "SELL"}, \
+            f"组合 {pid} 的 live_execution_policy.allowed_order_sides 只能包含 BUY/SELL"
+        assert float(live_execution_policy.get("max_single_order_notional", 0.0)) > 0, \
+            f"组合 {pid} 的 live_execution_policy.max_single_order_notional 必须大于 0"
+        assert 1 <= int(live_execution_policy.get("max_daily_order_count", 0)) <= 20, \
+            f"组合 {pid} 的 live_execution_policy.max_daily_order_count 应在 [1, 20] 范围内"
+        assert 0 < float(live_execution_policy.get("max_daily_turnover_ratio", 0.0)) <= 1.0, \
+            f"组合 {pid} 的 live_execution_policy.max_daily_turnover_ratio 应在 (0, 1] 范围内"
 
         asset_names = pf["asset_names"]
         for asset in assets:

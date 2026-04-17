@@ -124,6 +124,7 @@ class PaperAdapter(BrokerAdapter):
             avg_fill_price=price,
             message="paper fill",
             broker_reference=f"paper-{self._order_seq}",
+            commission=0.0,
         )
         self._receipts[receipt.order_id] = receipt
         return receipt
@@ -133,5 +134,9 @@ class PaperAdapter(BrokerAdapter):
             raise KeyError(f"未知 paper 订单 {order_id}")
         return self._receipts[order_id]
 
-    def cancel_order(self, order_id: str) -> bool:
-        return False
+    def cancel_order(self, order_id: str) -> BrokerOrderReceipt:
+        receipt = self.get_order_status(order_id)
+        receipt.status = OrderStatus.CANCELLED
+        receipt.message = "paper cancel"
+        self._receipts[order_id] = receipt
+        return receipt

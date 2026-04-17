@@ -16,6 +16,9 @@ SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 SCHEMA_TAX_HARVEST_PATH = Path(__file__).parent / "schema_tax_harvest.sql"
 SCHEMA_GOVERNANCE_PATH = Path(__file__).parent / "schema_governance.sql"
 SCHEMA_ALPHA_PATH = Path(__file__).parent / "schema_alpha.sql"
+SCHEMA_BROKER_SYNC_PATH = Path(__file__).parent / "schema_broker_sync.sql"
+SCHEMA_SHADOW_RUN_PATH = Path(__file__).parent / "schema_shadow_run.sql"
+SCHEMA_BROKER_EXECUTION_PATH = Path(__file__).parent / "schema_broker_execution.sql"
 
 
 class Database:
@@ -42,6 +45,15 @@ class Database:
             if SCHEMA_ALPHA_PATH.exists():
                 conn.executescript(SCHEMA_ALPHA_PATH.read_text(encoding="utf-8"))
                 self._migrate_alpha_schema(conn)
+            # 加载券商同步与对账扩展表
+            if SCHEMA_BROKER_SYNC_PATH.exists():
+                conn.executescript(SCHEMA_BROKER_SYNC_PATH.read_text(encoding="utf-8"))
+            # 加载影子运行扩展表
+            if SCHEMA_SHADOW_RUN_PATH.exists():
+                conn.executescript(SCHEMA_SHADOW_RUN_PATH.read_text(encoding="utf-8"))
+            # 加载券商执行审计扩展表
+            if SCHEMA_BROKER_EXECUTION_PATH.exists():
+                conn.executescript(SCHEMA_BROKER_EXECUTION_PATH.read_text(encoding="utf-8"))
 
     def _table_exists(self, conn, table_name: str) -> bool:
         row = conn.execute(
@@ -380,6 +392,329 @@ class Database:
         else:
             with self._conn() as c:
                 c.execute(sql, values)
+
+    def get_latest_daily_run(self, portfolio_id: str = "default") -> Optional[dict]:
+        """获取最近一次日常运行记录。"""
+        with self._conn() as conn:
+            row = conn.execute(
+                """SELECT * FROM daily_runs
+                   WHERE portfolio_id = ?
+                   ORDER BY date DESC, id DESC
+                   LIMIT 1""",
+                (portfolio_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def list_daily_runs(self, portfolio_id: str = "default", limit: int = 10) -> list[dict]:
+        """获取最近几次日常运行记录。"""
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT * FROM daily_runs
+                   WHERE portfolio_id = ?
+                   ORDER BY date DESC, id DESC
+                   LIMIT ?""",
+                (portfolio_id, limit),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    # ── 券商同步与对账 ────────────────────────────────
+
+    def save_broker_account_snapshot(
+        self,
+        portfolio_id: str,
+        broker_role: str,
+        broker_name: str,
+        broker_mode: str,
+        account_id: str,
+        currency: str,
+        cash: float,
+        total_value: float,
+        positions_json: str,
+        raw_json: str,
+        snapshot_time: str = "",
+        conn=None,
+    ):
+        sql = """INSERT INTO broker_account_snapshots
+                   (portfolio_id, broker_role, broker_name, broker_mode, account_id, currency,
+                    cash, total_value, positions_json, raw_json, snapshot_time)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+        values = (
+            portfolio_id,
+            broker_role,
+            broker_name,
+            broker_mode,
+            account_id,
+            currency,
+            cash,
+            total_value,
+            positions_json,
+            raw_json,
+            snapshot_time,
+        )
+        if conn:
+            conn.execute(sql, values)
+        else:
+            with self._conn() as c:
+                c.execute(sql, values)
+
+    def get_latest_broker_account_snapshot(self, portfolio_id: str, broker_role: str) -> Optional[dict]:
+        with self._conn() as conn:
+            row = conn.execute(
+                """SELECT * FROM broker_account_snapshots
+                   WHERE portfolio_id = ? AND broker_role = ?
+                   ORDER BY id DESC LIMIT 1""",
+                (portfolio_id, broker_role),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def list_broker_account_snapshots(
+        self,
+        portfolio_id: str,
+        broker_role: str,
+        limit: int = 5,
+    ) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT * FROM broker_account_snapshots
+                   WHERE portfolio_id = ? AND broker_role = ?
+                   ORDER BY id DESC LIMIT ?""",
+                (portfolio_id, broker_role, limit),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def save_broker_reconciliation_run(
+        self,
+        portfolio_id: str,
+        broker_role: str,
+        broker_name: str,
+        status: str,
+        checked_at: str,
+        items_json: str,
+        report_json: str,
+        conn=None,
+    ):
+        sql = """INSERT INTO broker_reconciliation_runs
+                   (portfolio_id, broker_role, broker_name, status, checked_at, items_json, report_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)"""
+        values = (
+            portfolio_id,
+            broker_role,
+            broker_name,
+            status,
+            checked_at,
+            items_json,
+            report_json,
+        )
+        if conn:
+            conn.execute(sql, values)
+        else:
+            with self._conn() as c:
+                c.execute(sql, values)
+
+    def get_latest_broker_reconciliation_run(self, portfolio_id: str, broker_role: str) -> Optional[dict]:
+        with self._conn() as conn:
+            row = conn.execute(
+                """SELECT * FROM broker_reconciliation_runs
+                   WHERE portfolio_id = ? AND broker_role = ?
+                   ORDER BY id DESC LIMIT 1""",
+                (portfolio_id, broker_role),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def list_broker_reconciliation_runs(
+        self,
+        portfolio_id: str,
+        broker_role: str,
+        limit: int = 5,
+    ) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT * FROM broker_reconciliation_runs
+                   WHERE portfolio_id = ? AND broker_role = ?
+                   ORDER BY id DESC LIMIT ?""",
+                (portfolio_id, broker_role, limit),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    # ── 影子运行 ──────────────────────────────────────
+
+    def save_shadow_run_report(
+        self,
+        portfolio_id: str,
+        broker_role: str,
+        broker_name: str,
+        checked_at: str,
+        dry_run: bool,
+        order_count: int,
+        reconciliation_status: str = "",
+        requires_attention: bool = False,
+        warnings_json: str = "[]",
+        report_json: str = "{}",
+        conn=None,
+    ):
+        sql = """INSERT INTO shadow_run_reports
+                   (portfolio_id, broker_role, broker_name, checked_at, dry_run, order_count,
+                    reconciliation_status, requires_attention, warnings_json, report_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+        values = (
+            portfolio_id,
+            broker_role,
+            broker_name,
+            checked_at,
+            1 if dry_run else 0,
+            order_count,
+            reconciliation_status,
+            1 if requires_attention else 0,
+            warnings_json,
+            report_json,
+        )
+        if conn:
+            conn.execute(sql, values)
+        else:
+            with self._conn() as c:
+                c.execute(sql, values)
+
+    def get_latest_shadow_run_report(self, portfolio_id: str, broker_role: str = "sandbox") -> Optional[dict]:
+        with self._conn() as conn:
+            row = conn.execute(
+                """SELECT * FROM shadow_run_reports
+                   WHERE portfolio_id = ? AND broker_role = ?
+                   ORDER BY id DESC LIMIT 1""",
+                (portfolio_id, broker_role),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def list_shadow_run_reports(
+        self,
+        portfolio_id: str,
+        broker_role: str = "sandbox",
+        limit: int = 5,
+    ) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT * FROM shadow_run_reports
+                   WHERE portfolio_id = ? AND broker_role = ?
+                   ORDER BY id DESC LIMIT ?""",
+                (portfolio_id, broker_role, limit),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    # ── 券商执行审计 ──────────────────────────────────
+
+    def save_broker_execution_event(
+        self,
+        *,
+        portfolio_id: str,
+        run_date: str,
+        broker_role: str,
+        broker_name: str,
+        broker_mode: str = "",
+        event_type: str,
+        event_time: str,
+        order_id: str = "",
+        client_order_id: str = "",
+        broker_reference: str = "",
+        symbol: str = "",
+        side: str = "",
+        requested_quantity: int = 0,
+        filled_quantity: int = 0,
+        avg_fill_price: float | None = None,
+        commission: float | None = None,
+        status: str = "",
+        message: str = "",
+        raw_json: str = "{}",
+        conn=None,
+    ):
+        sql = """INSERT INTO broker_execution_events
+                   (portfolio_id, run_date, broker_role, broker_name, broker_mode,
+                    event_type, event_time, order_id, client_order_id, broker_reference,
+                    symbol, side, requested_quantity, filled_quantity, avg_fill_price,
+                    commission, status, message, raw_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+        values = (
+            portfolio_id,
+            run_date,
+            broker_role,
+            broker_name,
+            broker_mode,
+            event_type,
+            event_time,
+            order_id,
+            client_order_id,
+            broker_reference,
+            symbol,
+            side,
+            requested_quantity,
+            filled_quantity,
+            avg_fill_price,
+            commission,
+            status,
+            message,
+            raw_json,
+        )
+        if conn:
+            conn.execute(sql, values)
+        else:
+            with self._conn() as c:
+                c.execute(sql, values)
+
+    def save_broker_execution_events(
+        self,
+        *,
+        portfolio_id: str,
+        run_date: str,
+        events: list[dict],
+        conn=None,
+    ):
+        if not events:
+            return
+        for event in events:
+            self.save_broker_execution_event(
+                portfolio_id=portfolio_id,
+                run_date=run_date,
+                broker_role=str(event.get("broker_role") or "primary"),
+                broker_name=str(event.get("broker_name") or "unknown"),
+                broker_mode=str(event.get("broker_mode") or ""),
+                event_type=str(event.get("event_type") or "UNKNOWN"),
+                event_time=str(event.get("event_time") or ""),
+                order_id=str(event.get("order_id") or ""),
+                client_order_id=str(event.get("client_order_id") or ""),
+                broker_reference=str(event.get("broker_reference") or ""),
+                symbol=str(event.get("symbol") or ""),
+                side=str(event.get("side") or ""),
+                requested_quantity=int(float(event.get("requested_quantity") or 0)),
+                filled_quantity=int(float(event.get("filled_quantity") or 0)),
+                avg_fill_price=float(event["avg_fill_price"]) if event.get("avg_fill_price") not in (None, "") else None,
+                commission=float(event["commission"]) if event.get("commission") not in (None, "") else None,
+                status=str(event.get("status") or ""),
+                message=str(event.get("message") or ""),
+                raw_json=json.dumps(event.get("raw") or {}, ensure_ascii=False, default=str),
+                conn=conn,
+            )
+
+    def list_broker_execution_events(
+        self,
+        portfolio_id: str,
+        run_date: Optional[str] = None,
+        broker_role: Optional[str] = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        with self._conn() as conn:
+            where = ["portfolio_id = ?"]
+            values = [portfolio_id]
+            if run_date:
+                where.append("run_date = ?")
+                values.append(run_date)
+            if broker_role:
+                where.append("broker_role = ?")
+                values.append(broker_role)
+            rows = conn.execute(
+                f"""SELECT * FROM broker_execution_events
+                    WHERE {' AND '.join(where)}
+                    ORDER BY id DESC LIMIT ?""",
+                values + [limit],
+            ).fetchall()
+            return [dict(r) for r in rows]
 
     # ── 税损收割（Tax-Loss Harvesting）────────────────
 

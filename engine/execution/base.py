@@ -49,6 +49,7 @@ class TradeOrder:
     filled_price: Optional[float] = None      # 实际成交价
     filled_quantity: Optional[int] = None      # 实际成交股数
     broker_order_id: Optional[str] = None      # 券商订单号
+    broker_reference: Optional[str] = None     # 券商侧永久引用 / 本地引用
     error_message: Optional[str] = None        # 错误信息
 
 
@@ -65,6 +66,7 @@ class ExecutionResult:
     total_sold: float             # 总卖出金额
     total_commission: float       # 总手续费
     message: str                  # 人类可读的摘要
+    broker_events: Optional[list[dict]] = None  # 执行审计事件
 
 
 class BaseExecutor(ABC):

@@ -8,6 +8,7 @@ import pandas as pd
 import pytest
 
 from db.database import Database
+from engine.config import PORTFOLIOS, validate_config
 from engine.execution.base import ExecutionResult, OrderSide, OrderStatus, TradeOrder
 from engine.risk import RiskSignal
 from runner import daily_runner as runner_module
@@ -47,6 +48,41 @@ def _make_market_service(end_date: str):
             }
 
     return StubMarketDataService
+
+
+def _seed_broker_sync(
+    db: Database,
+    *,
+    portfolio_id: str = "us",
+    checked_day: str = "2026-12-30",
+    status: str = "MATCHED",
+    items_json: str = "[]",
+    report_json: str = '{"requires_manual_intervention": false}',
+    broker_name: str = "ibkr",
+    currency: str = "USD",
+):
+    db.save_broker_account_snapshot(
+        portfolio_id=portfolio_id,
+        broker_role="primary",
+        broker_name=broker_name,
+        broker_mode="read_only",
+        account_id="U1234567",
+        currency=currency,
+        cash=0.0,
+        total_value=100000.0,
+        positions_json="{}",
+        raw_json="{}",
+        snapshot_time=f"{checked_day}T09:30:00+00:00",
+    )
+    db.save_broker_reconciliation_run(
+        portfolio_id=portfolio_id,
+        broker_role="primary",
+        broker_name=broker_name,
+        status=status,
+        checked_at=f"{checked_day}T09:31:00+00:00",
+        items_json=items_json,
+        report_json=report_json,
+    )
 
 
 class PendingExecutor:
@@ -157,6 +193,112 @@ class HighSlippageExecutor:
         )
 
 
+class FilledBrokerReceiptExecutor(FilledExecutor):
+    def execute(self, orders):
+        result = super().execute(orders)
+        for index, order in enumerate(result.orders):
+            order.broker_order_id = f"broker-{index + 1}"
+            order.broker_reference = f"perm-{index + 1}"
+        return result
+
+
+class FilledBrokerAuditExecutor(FilledBrokerReceiptExecutor):
+    def execute(self, orders):
+        result = super().execute(orders)
+        result.broker_events = [
+            {
+                "event_type": "SUBMIT_RESULT",
+                "event_time": "2026-12-30T09:31:00+00:00",
+                "broker_name": "ibkr",
+                "broker_role": "primary",
+                "broker_mode": "live",
+                "order_id": "broker-1",
+                "client_order_id": "xirang-spy-1",
+                "broker_reference": "perm-1",
+                "symbol": result.orders[0].symbol,
+                "side": result.orders[0].side.value,
+                "requested_quantity": result.orders[0].quantity,
+                "filled_quantity": 0,
+                "avg_fill_price": None,
+                "commission": None,
+                "status": "SUBMITTED",
+                "message": "submitted",
+                "raw": {"stage": "submit"},
+            },
+            {
+                "event_type": "STATUS_POLL",
+                "event_time": "2026-12-30T09:32:00+00:00",
+                "broker_name": "ibkr",
+                "broker_role": "primary",
+                "broker_mode": "live",
+                "order_id": "broker-1",
+                "client_order_id": "xirang-spy-1",
+                "broker_reference": "perm-1",
+                "symbol": result.orders[0].symbol,
+                "side": result.orders[0].side.value,
+                "requested_quantity": result.orders[0].quantity,
+                "filled_quantity": result.orders[0].filled_quantity,
+                "avg_fill_price": result.orders[0].filled_price,
+                "commission": result.total_commission,
+                "status": "FILLED",
+                "message": "filled",
+                "raw": {"stage": "poll"},
+            },
+        ]
+        return result
+
+
+class LargeOrderExecutor:
+    executed = False
+
+    def translate_orders(self, current_positions, target_weights, total_nav, current_prices):
+        return [
+            TradeOrder(
+                symbol=list(current_positions.keys())[0],
+                side=OrderSide.BUY,
+                quantity=100,
+                estimated_price=200.0,
+                estimated_amount=20000.0,
+            )
+        ]
+
+    def execute(self, orders):
+        LargeOrderExecutor.executed = True
+        for order in orders:
+            order.status = OrderStatus.FILLED
+            order.filled_quantity = order.quantity
+            order.filled_price = order.estimated_price
+            order.broker_order_id = "broker-large"
+        return ExecutionResult(
+            success=True,
+            orders=orders,
+            total_bought=20000.0,
+            total_sold=0.0,
+            total_commission=10.0,
+            message="large filled",
+        )
+
+
+class StubPostExecutionSyncService:
+    result = {
+        "status": "MATCHED",
+        "broker_name": "ibkr",
+        "broker_role": "primary",
+        "checked_at": "2026-12-30T09:35:00+00:00",
+        "difference_count": 0,
+        "requires_manual_intervention": False,
+        "local_state_source": "expected_post_execution",
+    }
+
+    def __init__(self, db):
+        self.db = db
+
+    def reconcile_expected_state(self, **kwargs):
+        result = dict(self.result)
+        result["kwargs"] = kwargs
+        return result
+
+
 class CaptureRiskEngine:
     seen_navs = []
 
@@ -181,6 +323,7 @@ class CaptureRiskEngine:
 def test_non_whitelisted_pending_execution_fails_closed(temp_db, monkeypatch):
     temp_db.ensure_portfolio("us", ["SPY", "TLT", "GLD", "SHV"])
     temp_db.update_portfolio("us", stability_balance=10_000.0)
+    _seed_broker_sync(temp_db, checked_day="2026-12-30")
 
     CaptureRiskEngine.seen_navs = []
     monkeypatch.setattr(runner_module, "MarketDataService", _make_market_service("2026-12-30"))
@@ -224,6 +367,7 @@ def test_stale_data_enters_manual_intervention_whitelist(temp_db, monkeypatch):
         return FilledExecutor()
 
     stale_date = (datetime.now().date() - timedelta(days=10)).isoformat()
+    _seed_broker_sync(temp_db, checked_day=stale_date)
     monkeypatch.setattr(runner_module, "MarketDataService", _make_market_service(stale_date))
     monkeypatch.setattr(runner_module, "create_executor", _executor_factory)
     monkeypatch.setattr(runner_module, "notify", lambda report: None)
@@ -238,6 +382,7 @@ def test_stale_data_enters_manual_intervention_whitelist(temp_db, monkeypatch):
 
 def test_missing_broker_receipt_enters_manual_intervention_whitelist(temp_db, monkeypatch):
     temp_db.ensure_portfolio("us", ["SPY", "TLT", "GLD", "SHV"])
+    _seed_broker_sync(temp_db, checked_day="2026-12-30")
 
     monkeypatch.setattr(runner_module, "MarketDataService", _make_market_service("2026-12-30"))
     monkeypatch.setattr(runner_module, "create_executor", lambda **kwargs: BrokerReceiptMissingExecutor())
@@ -253,6 +398,7 @@ def test_missing_broker_receipt_enters_manual_intervention_whitelist(temp_db, mo
 
 def test_excessive_slippage_enters_manual_intervention_whitelist(temp_db, monkeypatch):
     temp_db.ensure_portfolio("us", ["SPY", "TLT", "GLD", "SHV"])
+    _seed_broker_sync(temp_db, checked_day="2026-12-30")
 
     monkeypatch.setattr(runner_module, "MarketDataService", _make_market_service("2026-12-30"))
     monkeypatch.setattr(runner_module, "create_executor", lambda **kwargs: HighSlippageExecutor())
@@ -268,6 +414,7 @@ def test_excessive_slippage_enters_manual_intervention_whitelist(temp_db, monkey
 
 def test_core_runner_blocks_manual_executor_as_normal_mode(temp_db, monkeypatch):
     temp_db.ensure_portfolio("us", ["SPY", "TLT", "GLD", "SHV"])
+    _seed_broker_sync(temp_db, checked_day="2026-12-30")
 
     monkeypatch.setattr(runner_module, "MarketDataService", _make_market_service("2026-12-30"))
     monkeypatch.setattr(runner_module, "notify", lambda report: None)
@@ -291,6 +438,7 @@ def test_core_runner_blocks_manual_executor_as_normal_mode(temp_db, monkeypatch)
 
 def test_year_end_rebalance_only_triggers_once_per_year(temp_db, monkeypatch):
     temp_db.ensure_portfolio("us", ["SPY", "TLT", "GLD", "SHV"])
+    _seed_broker_sync(temp_db, checked_day="2026-12-30")
 
     market_cls = _make_market_service("2026-12-30")
     monkeypatch.setattr(runner_module, "MarketDataService", market_cls)
@@ -303,6 +451,7 @@ def test_year_end_rebalance_only_triggers_once_per_year(temp_db, monkeypatch):
     assert first["action"] == "年末强制再平衡"
 
     market_cls.market_date = "2026-12-31"
+    _seed_broker_sync(temp_db, checked_day="2026-12-31")
     second = runner.run_portfolio("us")
 
     assert second["run_status"] == "SUCCESS"
@@ -316,3 +465,347 @@ def test_year_end_rebalance_only_triggers_once_per_year(temp_db, monkeypatch):
         ).fetchone()["cnt"]
 
     assert count == 1
+
+
+def test_daily_runner_executes_shadow_sidecar_without_blocking_report(temp_db, monkeypatch):
+    temp_db.ensure_portfolio("us", ["SPY", "TLT", "GLD", "SHV"])
+    _seed_broker_sync(temp_db, checked_day="2026-12-30")
+
+    shadow_calls = {}
+
+    def _shadow_observer(**kwargs):
+        shadow_calls.update(kwargs)
+        temp_db.save_shadow_run_report(
+            portfolio_id=kwargs["portfolio_id"],
+            broker_role="sandbox",
+            broker_name="paper",
+            checked_at="2026-12-30T10:00:00+00:00",
+            dry_run=True,
+            order_count=1,
+            reconciliation_status="MATCHED",
+            requires_attention=False,
+            warnings_json="[]",
+            report_json='{"ok":true}',
+        )
+        return {"broker_name": "paper", "order_count": 1, "dry_run": True}
+
+    monkeypatch.setattr(runner_module, "MarketDataService", _make_market_service("2026-12-30"))
+    monkeypatch.setattr(runner_module, "create_executor", lambda **kwargs: FilledExecutor())
+    monkeypatch.setattr(runner_module, "observe_shadow_run", _shadow_observer)
+    monkeypatch.setattr(runner_module, "notify", lambda report: None)
+
+    result = runner_module.DailyRunner(temp_db).run_portfolio("us")
+
+    assert result["run_status"] == "SUCCESS"
+    assert result["shadow_run"]["order_count"] == 1
+    assert shadow_calls["portfolio_id"] == "us"
+    assert shadow_calls["total_nav"] > 0
+    latest_shadow = temp_db.get_latest_shadow_run_report("us")
+    assert latest_shadow is not None
+    assert latest_shadow["broker_name"] == "paper"
+
+
+def test_daily_runner_shadow_sidecar_fails_open(temp_db, monkeypatch):
+    temp_db.ensure_portfolio("us", ["SPY", "TLT", "GLD", "SHV"])
+    _seed_broker_sync(temp_db, checked_day="2026-12-30")
+
+    monkeypatch.setattr(runner_module, "MarketDataService", _make_market_service("2026-12-30"))
+    monkeypatch.setattr(runner_module, "create_executor", lambda **kwargs: FilledExecutor())
+    monkeypatch.setattr(runner_module, "observe_shadow_run", lambda **kwargs: (_ for _ in ()).throw(RuntimeError("shadow down")))
+    monkeypatch.setattr(runner_module, "notify", lambda report: None)
+
+    result = runner_module.DailyRunner(temp_db).run_portfolio("us")
+
+    assert result["run_status"] == "SUCCESS"
+    assert result["shadow_run"]["status"] == "FAILED"
+    assert "shadow down" in result["shadow_run"]["message"]
+
+
+def test_missing_primary_broker_sync_fails_closed_before_execution(temp_db, monkeypatch):
+    temp_db.ensure_portfolio("us", ["SPY", "TLT", "GLD", "SHV"])
+
+    called = {"executor": 0}
+
+    def _executor_factory(**kwargs):
+        called["executor"] += 1
+        return FilledExecutor()
+
+    monkeypatch.setattr(runner_module, "MarketDataService", _make_market_service("2026-12-30"))
+    monkeypatch.setattr(runner_module, "create_executor", _executor_factory)
+    monkeypatch.setattr(runner_module, "notify", lambda report: None)
+
+    result = runner_module.DailyRunner(temp_db).run_portfolio("us")
+
+    assert result["run_status"] == "FAILED_EXECUTION"
+    assert result["broker_sync_gate"]["code"] == "BROKER_SYNC_MISSING"
+    assert called["executor"] == 0
+
+
+def test_stale_primary_broker_sync_fails_closed_before_execution(temp_db, monkeypatch):
+    temp_db.ensure_portfolio("us", ["SPY", "TLT", "GLD", "SHV"])
+    _seed_broker_sync(temp_db, checked_day="2026-12-29")
+
+    called = {"executor": 0}
+
+    def _executor_factory(**kwargs):
+        called["executor"] += 1
+        return FilledExecutor()
+
+    monkeypatch.setattr(runner_module, "MarketDataService", _make_market_service("2026-12-30"))
+    monkeypatch.setattr(runner_module, "create_executor", _executor_factory)
+    monkeypatch.setattr(runner_module, "notify", lambda report: None)
+
+    result = runner_module.DailyRunner(temp_db).run_portfolio("us")
+
+    assert result["run_status"] == "FAILED_EXECUTION"
+    assert result["broker_sync_gate"]["code"] == "BROKER_SYNC_STALE"
+    assert called["executor"] == 0
+
+
+def test_primary_broker_drift_fails_closed_before_execution(temp_db, monkeypatch):
+    temp_db.ensure_portfolio("us", ["SPY", "TLT", "GLD", "SHV"])
+    _seed_broker_sync(
+        temp_db,
+        checked_day="2026-12-30",
+        status="DRIFT",
+        items_json='[{"category":"position","key":"SPY","delta":200,"threshold":50}]',
+        report_json='{"requires_manual_intervention": true}',
+    )
+
+    called = {"executor": 0}
+
+    def _executor_factory(**kwargs):
+        called["executor"] += 1
+        return FilledExecutor()
+
+    monkeypatch.setattr(runner_module, "MarketDataService", _make_market_service("2026-12-30"))
+    monkeypatch.setattr(runner_module, "create_executor", _executor_factory)
+    monkeypatch.setattr(runner_module, "notify", lambda report: None)
+
+    result = runner_module.DailyRunner(temp_db).run_portfolio("us")
+
+    assert result["run_status"] == "FAILED_EXECUTION"
+    assert result["broker_sync_gate"]["code"] == "BROKER_RECONCILIATION_DRIFT"
+    assert called["executor"] == 0
+
+
+def test_primary_broker_broken_fails_closed_before_execution(temp_db, monkeypatch):
+    temp_db.ensure_portfolio("us", ["SPY", "TLT", "GLD", "SHV"])
+    _seed_broker_sync(
+        temp_db,
+        checked_day="2026-12-30",
+        status="BROKEN",
+        items_json='[{"category":"nav","key":"total_value","delta":2000,"threshold":1}]',
+        report_json='{"requires_manual_intervention": true}',
+    )
+
+    called = {"executor": 0}
+
+    def _executor_factory(**kwargs):
+        called["executor"] += 1
+        return FilledExecutor()
+
+    monkeypatch.setattr(runner_module, "MarketDataService", _make_market_service("2026-12-30"))
+    monkeypatch.setattr(runner_module, "create_executor", _executor_factory)
+    monkeypatch.setattr(runner_module, "notify", lambda report: None)
+
+    result = runner_module.DailyRunner(temp_db).run_portfolio("us")
+
+    assert result["run_status"] == "FAILED_EXECUTION"
+    assert result["broker_sync_gate"]["code"] == "BROKER_RECONCILIATION_BROKEN"
+    assert called["executor"] == 0
+
+
+def test_broker_sync_time_policy_is_configurable_per_market(temp_db, monkeypatch):
+    temp_db.ensure_portfolio("cn", ["510300.SS", "511010.SS", "518880.SS", "MONEY"])
+    _seed_broker_sync(
+        temp_db,
+        portfolio_id="cn",
+        checked_day="2026-12-29",
+        broker_name="futu",
+        currency="CNY",
+    )
+
+    monkeypatch.setitem(PORTFOLIOS["cn"]["broker_sync_policy"], "require_snapshot_cover_market_date", False)
+    monkeypatch.setitem(PORTFOLIOS["cn"]["broker_sync_policy"], "require_reconciliation_cover_market_date", False)
+    monkeypatch.setitem(PORTFOLIOS["cn"]["broker_sync_policy"], "max_snapshot_lag_days", 1)
+    monkeypatch.setitem(PORTFOLIOS["cn"]["broker_sync_policy"], "max_reconciliation_lag_days", 1)
+    validate_config()
+
+    monkeypatch.setattr(runner_module, "MarketDataService", _make_market_service("2026-12-30"))
+    monkeypatch.setattr(runner_module, "create_executor", lambda **kwargs: FilledExecutor())
+    monkeypatch.setattr(runner_module, "notify", lambda report: None)
+
+    result = runner_module.DailyRunner(temp_db).run_portfolio("cn")
+
+    assert result["run_status"] == "SUCCESS"
+    assert result["action"] == "年末强制再平衡"
+
+
+def test_live_execution_market_must_be_whitelisted_per_portfolio(temp_db, monkeypatch):
+    temp_db.ensure_portfolio("cn", ["510300.SS", "511010.SS", "518880.SS", "MONEY"])
+    _seed_broker_sync(
+        temp_db,
+        portfolio_id="cn",
+        checked_day="2026-12-30",
+        broker_name="futu",
+        currency="CNY",
+    )
+
+    monkeypatch.setattr(runner_module, "MarketDataService", _make_market_service("2026-12-30"))
+    monkeypatch.setattr(runner_module, "create_executor", lambda **kwargs: FilledBrokerReceiptExecutor())
+    monkeypatch.setattr(runner_module, "notify", lambda report: None)
+    monkeypatch.setenv("XIRANG_EXECUTOR", "auto")
+
+    result = runner_module.DailyRunner(temp_db).run_portfolio("cn")
+
+    assert result["run_status"] == "FAILED_EXECUTION"
+    assert result["execution_policy_gate"]["code"] == "LIVE_EXECUTION_MARKET_DISABLED"
+    assert result["execution"]["status"] == "FAILED"
+    assert "尚未纳入真实执行白名单" in result["action"]
+
+    with temp_db._conn() as conn:
+        tx_row = conn.execute(
+            "SELECT type FROM transactions WHERE portfolio_id = ? ORDER BY id DESC LIMIT 1",
+            ("cn",),
+        ).fetchone()
+    assert tx_row["type"] == "REBALANCE_BLOCKED"
+
+
+def test_live_execution_blocks_single_order_notional_above_limit(temp_db, monkeypatch):
+    temp_db.ensure_portfolio("us", ["SPY", "TLT", "GLD", "SHV"])
+    _seed_broker_sync(temp_db, checked_day="2026-12-30")
+
+    LargeOrderExecutor.executed = False
+    monkeypatch.setitem(PORTFOLIOS["us"]["live_execution_policy"], "max_single_order_notional", 10000.0)
+    validate_config()
+    monkeypatch.setattr(runner_module, "MarketDataService", _make_market_service("2026-12-30"))
+    monkeypatch.setattr(runner_module, "create_executor", lambda **kwargs: LargeOrderExecutor())
+    monkeypatch.setattr(runner_module, "notify", lambda report: None)
+    monkeypatch.setenv("XIRANG_EXECUTOR", "auto")
+
+    result = runner_module.DailyRunner(temp_db).run_portfolio("us")
+
+    assert result["run_status"] == "FAILED_EXECUTION"
+    assert result["execution_policy_gate"]["code"] == "LIVE_EXECUTION_SINGLE_ORDER_TOO_LARGE"
+    assert result["execution"]["status"] == "FAILED"
+    assert LargeOrderExecutor.executed is False
+    assert "单笔金额过大" in result["action"]
+
+    with temp_db._conn() as conn:
+        tx_row = conn.execute(
+            "SELECT type FROM transactions WHERE portfolio_id = ? ORDER BY id DESC LIMIT 1",
+            ("us",),
+        ).fetchone()
+    assert tx_row["type"] == "REBALANCE_BLOCKED"
+
+
+def test_post_execution_reconciliation_must_match_before_local_rebalance(temp_db, monkeypatch):
+    temp_db.ensure_portfolio("us", ["SPY", "TLT", "GLD", "SHV"])
+    _seed_broker_sync(temp_db, checked_day="2026-12-30")
+
+    monkeypatch.setattr(runner_module, "MarketDataService", _make_market_service("2026-12-30"))
+    monkeypatch.setattr(runner_module, "create_executor", lambda **kwargs: FilledBrokerReceiptExecutor())
+    monkeypatch.setattr(runner_module, "BrokerSyncService", StubPostExecutionSyncService)
+    monkeypatch.setattr(runner_module, "notify", lambda report: None)
+    monkeypatch.setenv("XIRANG_EXECUTOR", "auto")
+
+    result = runner_module.DailyRunner(temp_db).run_portfolio("us")
+
+    assert result["run_status"] == "SUCCESS"
+    assert result["post_execution_reconciliation"]["status"] == "MATCHED"
+    assert result["post_execution_reconciliation"]["local_state_source"] == "expected_post_execution"
+
+
+def test_successful_live_execution_persists_broker_audit_events(temp_db, monkeypatch):
+    temp_db.ensure_portfolio("us", ["SPY", "TLT", "GLD", "SHV"])
+    _seed_broker_sync(temp_db, checked_day="2026-12-30")
+
+    monkeypatch.setattr(runner_module, "MarketDataService", _make_market_service("2026-12-30"))
+    monkeypatch.setattr(runner_module, "create_executor", lambda **kwargs: FilledBrokerAuditExecutor())
+    monkeypatch.setattr(runner_module, "BrokerSyncService", StubPostExecutionSyncService)
+    monkeypatch.setattr(runner_module, "notify", lambda report: None)
+    monkeypatch.setenv("XIRANG_EXECUTOR", "auto")
+
+    result = runner_module.DailyRunner(temp_db).run_portfolio("us")
+
+    assert result["run_status"] == "SUCCESS"
+    assert result["execution"]["broker_event_count"] == 2
+    assert result["execution"]["orders"][0]["broker_order_id"] == "broker-1"
+    assert result["execution"]["orders"][0]["broker_reference"] == "perm-1"
+
+    rows = temp_db.list_broker_execution_events("us", run_date="2026-12-30")
+
+    assert len(rows) == 2
+    assert rows[0]["event_type"] in {"STATUS_POLL", "SUBMIT_RESULT"}
+    assert {row["event_type"] for row in rows} == {"SUBMIT_RESULT", "STATUS_POLL"}
+
+
+def test_post_execution_reconciliation_drift_enters_manual_review(temp_db, monkeypatch):
+    temp_db.ensure_portfolio("us", ["SPY", "TLT", "GLD", "SHV"])
+    _seed_broker_sync(temp_db, checked_day="2026-12-30")
+
+    class DriftSyncService(StubPostExecutionSyncService):
+        result = {
+            "status": "DRIFT",
+            "broker_name": "ibkr",
+            "broker_role": "primary",
+            "checked_at": "2026-12-30T09:35:00+00:00",
+            "difference_count": 1,
+            "requires_manual_intervention": True,
+            "local_state_source": "expected_post_execution",
+        }
+
+    monkeypatch.setattr(runner_module, "MarketDataService", _make_market_service("2026-12-30"))
+    monkeypatch.setattr(runner_module, "create_executor", lambda **kwargs: FilledBrokerReceiptExecutor())
+    monkeypatch.setattr(runner_module, "BrokerSyncService", DriftSyncService)
+    monkeypatch.setattr(runner_module, "notify", lambda report: None)
+    monkeypatch.setenv("XIRANG_EXECUTOR", "auto")
+
+    result = runner_module.DailyRunner(temp_db).run_portfolio("us")
+
+    assert result["run_status"] == "MANUAL_INTERVENTION_REQUIRED"
+    assert result["manual_intervention_reasons"][0]["code"] == "POST_EXECUTION_RECONCILIATION_DRIFT"
+    assert result["post_execution_reconciliation"]["status"] == "DRIFT"
+
+    with temp_db._conn() as conn:
+        tx_row = conn.execute(
+            "SELECT type FROM transactions WHERE portfolio_id = ? ORDER BY id DESC LIMIT 1",
+            ("us",),
+        ).fetchone()
+    assert tx_row["type"] == "REBALANCE_MANUAL_REVIEW"
+
+
+def test_post_execution_reconciliation_broken_fails_closed(temp_db, monkeypatch):
+    temp_db.ensure_portfolio("us", ["SPY", "TLT", "GLD", "SHV"])
+    _seed_broker_sync(temp_db, checked_day="2026-12-30")
+
+    class BrokenSyncService(StubPostExecutionSyncService):
+        result = {
+            "status": "BROKEN",
+            "broker_name": "ibkr",
+            "broker_role": "primary",
+            "checked_at": "2026-12-30T09:35:00+00:00",
+            "difference_count": 2,
+            "requires_manual_intervention": True,
+            "local_state_source": "expected_post_execution",
+        }
+
+    monkeypatch.setattr(runner_module, "MarketDataService", _make_market_service("2026-12-30"))
+    monkeypatch.setattr(runner_module, "create_executor", lambda **kwargs: FilledBrokerReceiptExecutor())
+    monkeypatch.setattr(runner_module, "BrokerSyncService", BrokenSyncService)
+    monkeypatch.setattr(runner_module, "notify", lambda report: None)
+    monkeypatch.setenv("XIRANG_EXECUTOR", "auto")
+
+    result = runner_module.DailyRunner(temp_db).run_portfolio("us")
+
+    assert result["run_status"] == "FAILED_EXECUTION"
+    assert result["action"] == "执行后对账失败: 券商实仓与预期账本严重不一致"
+    assert result["post_execution_reconciliation"]["status"] == "BROKEN"
+
+    with temp_db._conn() as conn:
+        tx_row = conn.execute(
+            "SELECT type FROM transactions WHERE portfolio_id = ? ORDER BY id DESC LIMIT 1",
+            ("us",),
+        ).fetchone()
+    assert tx_row["type"] == "REBALANCE_FAILED"

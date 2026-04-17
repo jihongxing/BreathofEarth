@@ -381,6 +381,10 @@ async function loadDashboard() {
     renderWeightsChart(d.current_weights);
     renderDrawdownChart(d.drawdown_series);
     renderRiskEvents(d.risk_events);
+    renderObservationOverview(d.observation_overview, d.currency);
+    renderCoreObservationHistory(d.core_observation, d.currency);
+    renderBrokerSync(d.broker_sync, d.currency, d.core_observation);
+    renderShadowRun(d.shadow_run);
   } catch (err) {
     console.error("Dashboard load error:", err);
   }
@@ -482,6 +486,790 @@ function renderRiskEvents(events) {
   }
   el.innerHTML = events.map(function(e) {
     return '<div class="event-item"><span class="severity-' + esc(e.severity) + '">' + esc(e.event_type) + '</span> <span class="event-date">' + esc(e.date) + '</span><div style="font-size:0.8rem;color:var(--text-dim)">' + esc(e.action_taken) + '</div></div>';
+  }).join("");
+}
+
+function brokerRoleText(role) {
+  return role === "primary" ? t("brokerPrimary") : t("brokerBackup");
+}
+
+function brokerLevelText(level) {
+  var map = {
+    healthy: "brokerLevelHealthy",
+    warning: "brokerLevelWarning",
+    critical: "brokerLevelCritical",
+    missing: "brokerLevelMissing",
+  };
+  return t(map[level] || "brokerLevelMissing");
+}
+
+function brokerBadgeClass(level) {
+  if (level === "healthy") return "badge-approved";
+  if (level === "warning") return "badge-pending";
+  if (level === "critical") return "badge-rejected";
+  return "badge-expired";
+}
+
+function brokerSeverityText(level) {
+  var map = {
+    high: "brokerSeverityHigh",
+    medium: "brokerSeverityMedium",
+    low: "brokerSeverityLow",
+  };
+  return t(map[level] || "brokerSeverityLow");
+}
+
+function brokerGateReasonText(code, status) {
+  if (code === "BROKER_SYNC_MISSING") return t("brokerGateMissing");
+  if (code === "BROKER_SYNC_STALE") return t("brokerGateStale");
+  if (code === "BROKER_RECONCILIATION_DRIFT" || status === "DRIFT") return t("brokerGateDrift");
+  if (code === "BROKER_RECONCILIATION_BROKEN" || status === "BROKEN") return t("brokerGateBroken");
+  return t("brokerGateUnknown");
+}
+
+function brokerPolicyRoleText(role) {
+  return role === "backup" ? t("brokerBackup") : t("brokerPrimary");
+}
+
+function brokerPolicyBoolText(value) {
+  return value ? t("brokerPolicyRequired") : t("brokerPolicyRelaxed");
+}
+
+function executionPolicyGateReasonText(code) {
+  var map = {
+    LIVE_EXECUTION_MARKET_DISABLED: "observationExecPolicyCodeMarketDisabled",
+    LIVE_EXECUTION_ASSET_NOT_ALLOWED: "observationExecPolicyCodeAssetNotAllowed",
+    LIVE_EXECUTION_ACTION_NOT_ALLOWED: "observationExecPolicyCodeActionNotAllowed",
+    LIVE_EXECUTION_ORDER_COUNT_EXCEEDED: "observationExecPolicyCodeOrderCountExceeded",
+    LIVE_EXECUTION_SINGLE_ORDER_TOO_LARGE: "observationExecPolicyCodeSingleOrderTooLarge",
+    LIVE_EXECUTION_TURNOVER_TOO_LARGE: "observationExecPolicyCodeTurnoverTooLarge",
+  };
+  return t(map[code] || "observationExecPolicyCodeUnknown");
+}
+
+function formatPercentValue(value) {
+  return (Number(value || 0) * 100).toFixed(1) + "%";
+}
+
+function summarizeLiveExecutionPolicy(policy, currencySymbol) {
+  if (!policy) return "";
+  return [
+    t("brokerExecPolicyEnabled") + ": " + t(policy.enabled ? "brokerExecPolicyEnabledOn" : "brokerExecPolicyEnabledOff"),
+    t("brokerExecPolicySingleOrder") + ": " + (currencySymbol || "") + formatNum(policy.max_single_order_notional),
+    t("brokerExecPolicyOrderCount") + ": " + String(policy.max_daily_order_count || 0),
+    t("brokerExecPolicyTurnover") + ": " + formatPercentValue(policy.max_daily_turnover_ratio),
+  ].join(" · ");
+}
+
+function coreBlockSourceText(payload) {
+  if (!payload) return "";
+  if (payload.broker_sync_gate) return t("observationBlockSourceBrokerSync");
+  if (payload.execution_policy_gate) return t("observationBlockSourceExecPolicy");
+  if (payload.post_execution_reconciliation) return t("observationBlockSourcePostRecon");
+  if ((payload.manual_intervention_reasons || []).length) return t("observationBlockSourceManual");
+  return "";
+}
+
+function brokerExecutionStatusText(coreClosure) {
+  if (!coreClosure) return "";
+  if (coreClosure.broker_sync_gate) return t("brokerTimelineExecutionBlocked");
+
+  var status = String(coreClosure.execution_status || "").toUpperCase();
+  if (status === "FILLED") return t("brokerTimelineExecutionFilled");
+  if (status === "MANUAL_REVIEW") return t("brokerTimelineExecutionManual");
+  if (status === "FAILED") return t("brokerTimelineExecutionFailed");
+  if (status === "PENDING") return t("brokerTimelineExecutionPending");
+  if (String(coreClosure.run_status || "").toUpperCase() === "SKIPPED") return t("brokerTimelineExecutionSkipped");
+  if (Number(coreClosure.execution_order_count || 0) === 0) return t("brokerTimelineExecutionNoOrders");
+  return t("brokerTimelineExecutionUnknown");
+}
+
+function brokerPostTradeStatusText(coreClosure) {
+  if (!coreClosure) return "";
+  if (coreClosure.broker_sync_gate) return t("brokerTimelinePostTradeNotEntered");
+
+  var postRecon = coreClosure.post_execution_reconciliation || null;
+  if (postRecon && postRecon.status) return postExecutionReconciliationStatusText(postRecon.status);
+  if (String(coreClosure.execution_status || "").toUpperCase() === "FILLED") return t("observationPostReconMissing");
+  return t("brokerTimelinePostTradeNotApplicable");
+}
+
+function summarizeBrokerPolicy(policy) {
+  if (!policy) return "";
+  return [
+    t("brokerPolicyRole") + ": " + brokerPolicyRoleText(policy.required_role),
+    t("brokerPolicySnapshotLag") + ": " + String(policy.max_snapshot_lag_days || 0) + " " + t("brokerPolicyLagUnit"),
+    t("brokerPolicyReconciliationLag") + ": " + String(policy.max_reconciliation_lag_days || 0) + " " + t("brokerPolicyLagUnit"),
+  ].join(" · ");
+}
+
+function getBrokerGateDetail(coreObservation) {
+  if (!coreObservation || !coreObservation.broker_sync_gate) return null;
+  var gate = coreObservation.broker_sync_gate;
+  return {
+    code: gate.code || "",
+    status: gate.status || "",
+    brokerName: gate.broker_name || "",
+    message: gate.message || "",
+    reasonText: brokerGateReasonText(gate.code, gate.status),
+  };
+}
+
+function postExecutionReconciliationStatusText(status) {
+  var map = {
+    MATCHED: "observationPostReconMatched",
+    DRIFT: "observationPostReconDrift",
+    BROKEN: "observationPostReconBroken",
+    MISSING: "observationPostReconMissing",
+  };
+  return t(map[status] || "observationPostReconMissing");
+}
+
+function coreRunStatusText(status, level) {
+  if (status === "FAILED_EXECUTION") return t("coreRunFailed");
+  if (status === "MANUAL_INTERVENTION_REQUIRED") return t("coreRunManual");
+  if (status === "SUCCESS") return t("coreRunSuccess");
+  if (status === "SKIPPED") return t("coreRunSkipped");
+  return observationStatusText(level || "missing");
+}
+
+function formatSyncTime(value) {
+  if (!value) return t("brokerNoSyncYet");
+  return String(value).replace("T", " ").replace("+00:00", " UTC");
+}
+
+function observationStatusText(level) {
+  var map = {
+    healthy: "observationStatusHealthy",
+    warning: "observationStatusWarning",
+    critical: "observationStatusCritical",
+    missing: "observationStatusMissing",
+  };
+  return t(map[level] || "observationStatusMissing");
+}
+
+function observationChainTitle(chainId) {
+  var map = {
+    core: "observationCoreTitle",
+    broker_sync: "observationBrokerTitle",
+    shadow_run: "observationShadowTitle",
+  };
+  return t(map[chainId] || "observationOverviewTitle");
+}
+
+function observationChainIcon(chainId) {
+  var map = {
+    core: "🧱",
+    broker_sync: "🛰️",
+    shadow_run: "🪞",
+  };
+  return map[chainId] || "•";
+}
+
+function getObservationHeadline(item) {
+  var payload = item && item.payload ? item.payload : {};
+  var summary = payload.summary || {};
+  var firstReason = (payload.manual_intervention_reasons || [])[0] || {};
+  var gate = payload.broker_sync_gate || {};
+  var executionPolicyGate = payload.execution_policy_gate || {};
+  var postRecon = payload.post_execution_reconciliation || {};
+
+  if (!item) return t("observationEmpty");
+
+  if (item.id === "core") {
+    if (item.level === "critical" && gate.message) return gate.message;
+    if (item.level === "critical" && executionPolicyGate.message) return t("observationCoreExecPolicyCriticalHeadline");
+    if (postRecon.status === "BROKEN") return payload.action || t("observationCorePostReconCriticalHeadline");
+    if (item.level === "critical") return payload.action || payload.execution_message || t("observationCoreCriticalHeadline");
+    if (postRecon.status === "DRIFT") return payload.action || t("observationCorePostReconWarningHeadline");
+    if (item.level === "warning") return payload.action || firstReason.message || t("observationCoreWarningHeadline");
+    if (item.level === "missing") return t("observationCoreMissingHeadline");
+    return t("observationCoreHealthyHeadline");
+  }
+
+  if (item.id === "broker_sync") {
+    if (item.level === "critical") return t("observationBrokerCriticalHeadline", { n: String(summary.critical_count || 0) });
+    if (item.level === "warning") return t("observationBrokerWarningHeadline", { n: String(summary.attention_role_count || 0) });
+    if (item.level === "missing") return t("observationBrokerMissingHeadline");
+    return t("observationBrokerHealthyHeadline");
+  }
+
+  if (item.id === "shadow_run") {
+    if (item.level === "critical") return payload.execution_message || t("observationShadowCriticalHeadline");
+    if (item.level === "warning") return (payload.warnings || [])[0] || t("observationShadowWarningHeadline");
+    if (item.level === "missing") return t("observationShadowMissingHeadline");
+    return t("observationShadowHealthyHeadline");
+  }
+
+  return t("observationEmpty");
+}
+
+function getObservationGateDetail(item) {
+  var payload = item && item.payload ? item.payload : {};
+  if (!item || item.id !== "core" || !payload.broker_sync_gate) return null;
+
+  var gate = payload.broker_sync_gate;
+  return {
+    title: t("observationGateTitle"),
+    code: gate.code || "",
+    message: gate.message || "",
+    status: gate.status || "",
+    brokerName: gate.broker_name || "",
+    brokerLabel: t("observationGateBroker"),
+    statusLabel: t("observationGateStatus"),
+    codeLabel: t("observationGateCode"),
+  };
+}
+
+function getObservationPostReconDetail(item) {
+  var payload = item && item.payload ? item.payload : {};
+  var postRecon = payload.post_execution_reconciliation || null;
+  if (!item || item.id !== "core" || !postRecon || !postRecon.status || postRecon.status === "MATCHED") return null;
+
+  return {
+    title: t("observationPostReconTitle"),
+    message: payload.action || (
+      postRecon.status === "BROKEN"
+        ? t("observationCorePostReconCriticalHeadline")
+        : t("observationCorePostReconWarningHeadline")
+    ),
+    status: postRecon.status,
+    brokerName: postRecon.broker_name || "",
+    brokerLabel: t("observationGateBroker"),
+    statusLabel: t("observationPostReconStatus"),
+    differenceCount: Number(postRecon.difference_count || 0),
+    differenceCountLabel: t("observationPostReconDiffCount"),
+    checkedAt: postRecon.checked_at || "",
+    checkedAtLabel: t("observationPostReconCheckedAt"),
+  };
+}
+
+function getObservationExecutionPolicyDetail(item) {
+  var payload = item && item.payload ? item.payload : {};
+  var gate = payload.execution_policy_gate || null;
+  if (!item || item.id !== "core" || !gate) return null;
+
+  return {
+    title: t("observationExecPolicyTitle"),
+    message: gate.message || t("observationCoreExecPolicyCriticalHeadline"),
+    code: gate.code || "",
+    codeLabel: t("observationGateCode"),
+    status: executionPolicyGateReasonText(gate.code),
+    statusLabel: t("observationExecPolicyStatus"),
+    value: gate.estimated_amount != null
+      ? formatNum(gate.estimated_amount)
+      : gate.order_count != null
+        ? String(gate.order_count)
+        : gate.turnover != null
+          ? formatPercentValue(gate.turnover)
+          : "",
+    valueLabel: t("observationExecPolicyValue"),
+    limit: gate.max_single_order_notional != null
+      ? formatNum(gate.max_single_order_notional)
+      : gate.max_daily_order_count != null
+        ? String(gate.max_daily_order_count)
+        : gate.max_daily_turnover_ratio != null
+          ? formatPercentValue(gate.max_daily_turnover_ratio)
+          : "",
+    limitLabel: t("observationExecPolicyLimit"),
+  };
+}
+
+function getObservationAttentionDetail(item) {
+  return getObservationGateDetail(item) || getObservationExecutionPolicyDetail(item) || getObservationPostReconDetail(item);
+}
+
+function getObservationMetrics(item, currencySymbol) {
+  var payload = item && item.payload ? item.payload : {};
+  var summary = payload.summary || {};
+  var executionPolicyGate = payload.execution_policy_gate || null;
+  var postRecon = payload.post_execution_reconciliation || null;
+  var metrics = [];
+
+  if (item.timestamp) metrics.push(t("observationUpdatedAt") + ": " + formatSyncTime(item.timestamp));
+
+  if (item.id === "core") {
+    if (payload.run_date) metrics.push(t("observationRunDate") + ": " + esc(payload.run_date));
+    if (payload.nav != null) metrics.push(t("observationNav") + ": " + esc((currencySymbol || "") + formatNum(payload.nav)));
+    if (payload.execution_status) metrics.push(t("observationExecution") + ": " + esc(payload.execution_status));
+    if ((payload.manual_intervention_reasons || []).length) {
+      metrics.push(t("observationManualReasons") + ": " + esc(String(payload.manual_intervention_reasons.length)));
+    }
+    if (coreBlockSourceText(payload)) {
+      metrics.push(t("observationBlockSource") + ": " + esc(coreBlockSourceText(payload)));
+    }
+    if (executionPolicyGate && executionPolicyGate.code) {
+      metrics.push(t("observationExecPolicyStatus") + ": " + esc(executionPolicyGateReasonText(executionPolicyGate.code)));
+    }
+    if (postRecon && postRecon.status) {
+      metrics.push(t("observationPostReconStatus") + ": " + esc(postExecutionReconciliationStatusText(postRecon.status)));
+      metrics.push(t("observationPostReconDiffCount") + ": " + esc(String(postRecon.difference_count || 0)));
+      if (postRecon.checked_at) {
+        metrics.push(t("observationPostReconCheckedAt") + ": " + formatSyncTime(postRecon.checked_at));
+      }
+    }
+  } else if (item.id === "broker_sync") {
+    metrics.push(t("brokerCriticalCount") + ": " + esc(String(summary.critical_count || 0)));
+    metrics.push(t("brokerWarningCount") + ": " + esc(String(summary.warning_count || 0)));
+    metrics.push(t("observationBrokerRoles") + ": " + esc(String(summary.attention_role_count || 0)));
+  } else if (item.id === "shadow_run") {
+    metrics.push(t("shadowRunOrders") + ": " + esc(String(payload.order_count || 0)));
+    metrics.push(t("shadowRunWarnings") + ": " + esc(String(payload.warning_count || 0)));
+    metrics.push(t("shadowRunAttentionStreakRuns") + ": " + esc(String(payload.attention_streak_runs || 0)));
+  }
+
+  return metrics;
+}
+
+function renderObservationOverview(overviewData, currencySymbol) {
+  var el = document.getElementById("observation-overview");
+  if (!el) return;
+
+  if (!overviewData || !overviewData.items || !overviewData.items.length) {
+    el.innerHTML = emptyStateHTML("🧭", "observationEmpty", "observationEmptyHint");
+    return;
+  }
+
+  var focusItem = overviewData.focus_item || overviewData.items[0];
+  var focusHeadline = getObservationHeadline(focusItem);
+  var focusMetrics = getObservationMetrics(focusItem, currencySymbol);
+  var focusDetail = getObservationAttentionDetail(focusItem);
+
+  el.innerHTML = '' +
+    '<div class="observation-focus-card level-' + esc(focusItem.level || "missing") + '">' +
+      '<div class="observation-focus-top">' +
+        '<div>' +
+          '<div class="observation-focus-label">' + esc(t("observationFocusTitle")) + '</div>' +
+          '<div class="observation-focus-chain">' + esc(observationChainIcon(focusItem.id)) + ' ' + esc(observationChainTitle(focusItem.id)) + '</div>' +
+        '</div>' +
+        '<span class="badge ' + brokerBadgeClass(focusItem.level || "missing") + '">' + esc(observationStatusText(focusItem.level || "missing")) + '</span>' +
+      '</div>' +
+      '<div class="observation-focus-headline">' + esc(focusHeadline) + '</div>' +
+      '<div class="observation-focus-metrics">' + focusMetrics.map(function(metric) {
+        return '<span>' + metric + '</span>';
+      }).join("") + '</div>' +
+      (focusDetail
+        ? '<div class="observation-gate-box">' +
+            '<div class="observation-gate-title">' + esc(focusDetail.title) + '</div>' +
+            '<div class="observation-gate-message">' + esc(focusDetail.message) + '</div>' +
+            '<div class="observation-gate-meta">' +
+              (focusDetail.brokerName ? '<span>' + esc(focusDetail.brokerLabel || t("observationGateBroker")) + ': ' + esc(String(focusDetail.brokerName).toUpperCase()) + '</span>' : '') +
+              (focusDetail.status ? '<span>' + esc(focusDetail.statusLabel || t("observationGateStatus")) + ': ' + esc(focusDetail.status) + '</span>' : '') +
+              (focusDetail.code ? '<span>' + esc(focusDetail.codeLabel || t("observationGateCode")) + ': ' + esc(focusDetail.code) + '</span>' : '') +
+              (focusDetail.value ? '<span>' + esc(focusDetail.valueLabel || t("observationExecPolicyValue")) + ': ' + esc(focusDetail.value) + '</span>' : '') +
+              (focusDetail.limit ? '<span>' + esc(focusDetail.limitLabel || t("observationExecPolicyLimit")) + ': ' + esc(focusDetail.limit) + '</span>' : '') +
+              (focusDetail.differenceCount != null ? '<span>' + esc(focusDetail.differenceCountLabel || t("observationPostReconDiffCount")) + ': ' + esc(String(focusDetail.differenceCount)) + '</span>' : '') +
+              (focusDetail.checkedAt ? '<span>' + esc(focusDetail.checkedAtLabel || t("observationPostReconCheckedAt")) + ': ' + esc(formatSyncTime(focusDetail.checkedAt)) + '</span>' : '') +
+            '</div>' +
+          '</div>'
+        : '') +
+      '<div class="observation-focus-note">' + esc(t("observationReadonlyHint")) + '</div>' +
+    '</div>' +
+    '<div class="observation-chain-grid">' + overviewData.items.map(function(item) {
+      var metrics = getObservationMetrics(item, currencySymbol).slice(0, 2);
+      var detail = getObservationAttentionDetail(item);
+      return '' +
+        '<div class="observation-chain-card level-' + esc(item.level || "missing") + '">' +
+          '<div class="observation-chain-top">' +
+            '<div>' +
+              '<div class="observation-chain-title">' + esc(observationChainIcon(item.id)) + ' ' + esc(observationChainTitle(item.id)) + '</div>' +
+              '<div class="observation-chain-headline">' + esc(getObservationHeadline(item)) + '</div>' +
+            '</div>' +
+            '<span class="badge ' + brokerBadgeClass(item.level || "missing") + '">' + esc(observationStatusText(item.level || "missing")) + '</span>' +
+          '</div>' +
+          '<div class="observation-chain-metrics">' + metrics.map(function(metric) {
+            return '<span>' + metric + '</span>';
+          }).join("") + '</div>' +
+          (detail
+            ? '<div class="observation-gate-inline">' + esc(detail.title) + ': ' + esc(detail.message) + '</div>'
+            : '') +
+        '</div>';
+    }).join("") + '</div>';
+}
+
+function renderShadowRun(shadowData) {
+  var panelEl = document.getElementById("shadow-run-panel");
+  var timelineEl = document.getElementById("shadow-run-timeline");
+  if (!panelEl) return;
+
+  if (!timelineEl) return;
+
+  if (!shadowData || !shadowData.last_run_at) {
+    panelEl.innerHTML = emptyStateHTML("🪞", "shadowRunEmpty", "shadowRunHint");
+    timelineEl.innerHTML = emptyStateHTML("🕰️", "shadowRunTimelineEmpty", "shadowRunTimelineHint");
+    return;
+  }
+
+  var reconciliationText = shadowData.reconciliation_status
+    ? brokerLevelText(shadowData.reconciliation_level || "missing")
+    : t("brokerNoSyncYet");
+
+  panelEl.innerHTML = '' +
+    '<div class="broker-sync-overall-card level-' + esc(shadowData.level || "missing") + '">' +
+      '<div class="broker-sync-overall-main">' +
+        '<div>' +
+          '<div class="broker-sync-overall-label">' + esc(t("shadowRunStatus")) + '</div>' +
+          '<div class="broker-sync-overall-status">' + esc(shadowData.dry_run ? t("shadowRunDryRun") : t("shadowRunUnknown")) + '</div>' +
+        '</div>' +
+        '<span class="badge ' + brokerBadgeClass(shadowData.level || "missing") + '">' + esc(
+          shadowData.requires_attention ? t("brokerAttentionNeeded") : t("brokerAttentionNotNeeded")
+        ) + '</span>' +
+      '</div>' +
+      '<div class="broker-sync-overall-metrics">' +
+        '<span>' + esc(t("brokerLastCheck")) + ': ' + esc(formatSyncTime(shadowData.last_run_at)) + '</span>' +
+        '<span>' + esc(t("shadowRunOrders")) + ': ' + esc(String(shadowData.order_count || 0)) + '</span>' +
+        '<span>' + esc(t("shadowRunRecon")) + ': ' + esc(reconciliationText) + '</span>' +
+        '<span>' + esc(t("shadowRunAttentionStreakRuns")) + ': ' + esc(String(shadowData.attention_streak_runs || 0)) + '</span>' +
+        '<span>' + esc(t("shadowRunAttentionStreakDays")) + ': ' + esc(String(shadowData.attention_streak_days || 0)) + '</span>' +
+      '</div>' +
+      '<div class="broker-sync-overall-note">' + esc(t("shadowRunReadonlyHint")) + '</div>' +
+      ((shadowData.warnings || []).length
+        ? '<div class="shadow-run-warnings">' + shadowData.warnings.map(function(item) {
+            return '<div class="shadow-run-warning">' + esc(item) + '</div>';
+          }).join("") + '</div>'
+        : '') +
+    '</div>';
+
+  if (!shadowData.history || !shadowData.history.length) {
+    timelineEl.innerHTML = emptyStateHTML("🕰️", "shadowRunTimelineEmpty", "shadowRunTimelineHint");
+    return;
+  }
+
+  timelineEl.innerHTML = shadowData.history.map(function(item) {
+    var reconciliationItemText = item.reconciliation_status
+      ? brokerLevelText(item.reconciliation_level || "missing")
+      : t("brokerNoSyncYet");
+    var warningPreview = (item.warnings || []).length
+      ? '<div class="shadow-timeline-warning">' + esc(item.warnings[0]) + '</div>'
+      : '';
+
+    return '' +
+      '<div class="shadow-timeline-item level-' + esc(item.level || "healthy") + '">' +
+        '<div class="shadow-timeline-marker"></div>' +
+        '<div class="shadow-timeline-card">' +
+          '<div class="shadow-timeline-top">' +
+            '<div>' +
+              '<div class="shadow-timeline-title">' + esc((item.broker_name || "paper").toUpperCase()) + ' · ' + esc(item.dry_run ? t("shadowRunDryRun") : t("shadowRunUnknown")) + '</div>' +
+              '<div class="shadow-timeline-time">' + esc(formatSyncTime(item.timestamp)) + '</div>' +
+            '</div>' +
+            '<span class="badge ' + brokerBadgeClass(item.level || "healthy") + '">' + esc(
+              item.requires_attention ? t("brokerAttentionNeeded") : t("brokerAttentionNotNeeded")
+            ) + '</span>' +
+          '</div>' +
+          '<div class="shadow-timeline-metrics">' +
+            '<span>' + esc(t("shadowRunOrders")) + ': ' + esc(String(item.order_count || 0)) + '</span>' +
+            '<span>' + esc(t("shadowRunRecon")) + ': ' + esc(reconciliationItemText) + '</span>' +
+            '<span>' + esc(t("shadowRunWarnings")) + ': ' + esc(String(item.warning_count || 0)) + '</span>' +
+          '</div>' +
+          warningPreview +
+        '</div>' +
+      '</div>';
+  }).join("");
+}
+
+function renderBrokerHistoryColumn(role, entries, currencySymbol) {
+  var header = '' +
+    '<div class="broker-timeline-role-header">' +
+      '<div class="broker-timeline-role-title">' + esc(brokerRoleText(role)) + '</div>' +
+      '<div class="broker-timeline-role-subtitle">' + esc(t("brokerTimelineClosureHint")) + '</div>' +
+    '</div>';
+
+  if (!entries || !entries.length) {
+    return '' +
+      '<div class="broker-timeline-column">' +
+        header +
+        '<div class="empty-state" style="padding:24px 12px">' +
+          '<div class="empty-state-icon" style="font-size:1.5rem">🕰️</div>' +
+          '<div class="empty-state-text" style="font-size:0.85rem">' + esc(t("brokerTimelineEmpty")) + '</div>' +
+        '</div>' +
+      '</div>';
+  }
+
+  return '' +
+    '<div class="broker-timeline-column">' +
+      header +
+      '<div class="broker-timeline-list">' +
+        entries.map(function(item) {
+          var valueText = item.total_value == null
+            ? esc(t("brokerNoSyncYet"))
+            : esc((item.currency || currencySymbol || "") + formatNum(item.total_value));
+          var coreClosure = item.core_closure || null;
+          var postRecon = coreClosure ? (coreClosure.post_execution_reconciliation || null) : null;
+          var linkedRunInfo = coreClosure
+            ? '<div class="broker-timeline-linked-run">' +
+                '<span>' + esc(t("brokerTimelineLinkedRun")) + ': ' + esc(coreRunStatusText(coreClosure.run_status, item.level)) + '</span>' +
+                '<span>' + esc(t("brokerTimelineOrders")) + ': ' + esc(String(coreClosure.execution_order_count || 0)) + '</span>' +
+              '</div>'
+            : '';
+          var closureStages = coreClosure
+            ? '<div class="broker-closure-stages">' +
+                '<div class="broker-closure-stage">' +
+                  '<div class="broker-closure-stage-label">' + esc(t("brokerTimelineStagePreTrade")) + '</div>' +
+                  '<div class="broker-closure-stage-value">' + esc(brokerLevelText(item.level)) + '</div>' +
+                '</div>' +
+                '<div class="broker-closure-stage">' +
+                  '<div class="broker-closure-stage-label">' + esc(t("brokerTimelineStageExecution")) + '</div>' +
+                  '<div class="broker-closure-stage-value">' + esc(brokerExecutionStatusText(coreClosure)) + '</div>' +
+                '</div>' +
+                '<div class="broker-closure-stage">' +
+                  '<div class="broker-closure-stage-label">' + esc(t("brokerTimelineStagePostTrade")) + '</div>' +
+                  '<div class="broker-closure-stage-value">' + esc(brokerPostTradeStatusText(coreClosure)) + '</div>' +
+                '</div>' +
+              '</div>'
+            : '';
+          var closureMeta = coreClosure
+            ? '<div class="broker-timeline-foot">' +
+                (coreClosure.broker_sync_gate && coreClosure.broker_sync_gate.code
+                  ? '<span>' + esc(t("observationGateCode")) + ': ' + esc(coreClosure.broker_sync_gate.code) + '</span>'
+                  : '') +
+                (postRecon && postRecon.difference_count != null
+                  ? '<span>' + esc(t("observationPostReconDiffCount")) + ': ' + esc(String(postRecon.difference_count || 0)) + '</span>'
+                  : '') +
+                (postRecon && postRecon.checked_at
+                  ? '<span>' + esc(t("observationPostReconCheckedAt")) + ': ' + esc(formatSyncTime(postRecon.checked_at)) + '</span>'
+                  : '') +
+              '</div>'
+            : '';
+          var closureHeadline = coreClosure && coreClosure.action
+            ? '<div class="broker-timeline-headline">' + esc(coreClosure.action) + '</div>'
+            : '';
+
+          return '' +
+            '<div class="broker-timeline-item level-' + esc(item.level) + '">' +
+              '<div class="broker-timeline-marker"></div>' +
+              '<div class="broker-timeline-card">' +
+                '<div class="broker-timeline-top">' +
+                  '<div>' +
+                    '<div class="broker-timeline-broker">' + esc((item.broker_name || item.configured_broker || "").toUpperCase()) + '</div>' +
+                    '<div class="broker-timeline-time">' + esc(formatSyncTime(item.timestamp)) + '</div>' +
+                  '</div>' +
+                  '<span class="badge ' + brokerBadgeClass(item.level) + '">' + esc(brokerLevelText(item.level)) + '</span>' +
+                '</div>' +
+                '<div class="broker-timeline-metrics">' +
+                  '<span>' + esc(t("brokerDiffCount")) + ': ' + esc(String(item.difference_count || 0)) + '</span>' +
+                  '<span>' + esc(t("brokerCriticalCount")) + ': ' + esc(String(item.high_count || 0)) + '</span>' +
+                  '<span>' + esc(t("brokerWarningCount")) + ': ' + esc(String(item.medium_count || 0)) + '</span>' +
+                '</div>' +
+                linkedRunInfo +
+                closureStages +
+                closureHeadline +
+                closureMeta +
+                '<div class="broker-timeline-foot">' +
+                  '<span>' + esc(t("brokerTotalValue")) + ': ' + valueText + '</span>' +
+                  '<span>' + esc(t("brokerAnomalyStreakRuns")) + ': ' + esc(String(item.streak_index || 0)) + '</span>' +
+                  '<span>' + esc(t("brokerDriftStreakDays")) + ': ' + esc(String(item.drift_streak_days || 0)) + '</span>' +
+                '</div>' +
+                '<div class="broker-timeline-foot">' +
+                  '<span>' + esc(t(item.requires_attention ? "brokerAttentionNeeded" : "brokerAttentionNotNeeded")) + '</span>' +
+                '</div>' +
+              '</div>' +
+            '</div>';
+        }).join("") +
+      '</div>' +
+    '</div>';
+}
+
+function renderBrokerSync(syncData, currencySymbol, coreObservation) {
+  var overallEl = document.getElementById("broker-sync-overall");
+  var summaryEl = document.getElementById("broker-sync-summary");
+  var anomaliesEl = document.getElementById("broker-sync-anomalies");
+  var timelineEl = document.getElementById("broker-sync-timeline");
+  var gateDetail = getBrokerGateDetail(coreObservation);
+  var executionPolicyDetail = getObservationExecutionPolicyDetail({ id: "core", payload: coreObservation || {} });
+  var liveExecutionPolicy = (coreObservation && coreObservation.live_execution_policy) || null;
+
+  if (!overallEl || !summaryEl || !anomaliesEl || !timelineEl) return;
+  if (!syncData || !syncData.roles || !syncData.roles.length) {
+    overallEl.innerHTML = "";
+    summaryEl.innerHTML = emptyStateHTML("🛰️", "brokerNoSyncData");
+    anomaliesEl.innerHTML = emptyStateHTML("🧭", "brokerNoAnomalies", "brokerNoAnomaliesHint");
+    timelineEl.innerHTML = emptyStateHTML("🕰️", "brokerTimelineEmpty", "brokerTimelineHint");
+    return;
+  }
+
+  var summary = syncData.summary || {};
+  var policy = syncData.policy || {};
+  var missingCount = syncData.roles.filter(function(role) { return role.level === "missing"; }).length;
+  overallEl.innerHTML = '' +
+    '<div class="broker-sync-overall-card level-' + esc(summary.overall_level || "missing") + '">' +
+      '<div class="broker-sync-overall-main">' +
+        '<div>' +
+          '<div class="broker-sync-overall-label">' + esc(t("brokerOverallStatus")) + '</div>' +
+          '<div class="broker-sync-overall-status">' + esc(brokerLevelText(summary.overall_level || "missing")) + '</div>' +
+        '</div>' +
+        '<span class="badge ' + brokerBadgeClass(summary.overall_level || "missing") + '">' + esc(
+          summary.requires_attention ? t("brokerAttentionNeeded") : t("brokerAttentionNotNeeded")
+        ) + '</span>' +
+      '</div>' +
+      '<div class="broker-sync-overall-metrics">' +
+        '<span>' + esc(t("brokerCriticalCount")) + ': ' + esc(String(summary.critical_count || 0)) + '</span>' +
+        '<span>' + esc(t("brokerWarningCount")) + ': ' + esc(String(summary.warning_count || 0)) + '</span>' +
+        '<span>' + esc(t("brokerMissingCount")) + ': ' + esc(String(missingCount)) + '</span>' +
+      '</div>' +
+      (gateDetail
+        ? '<div class="broker-gate-banner">' +
+            '<div class="broker-gate-banner-title">' + esc(t("brokerGateBannerTitle")) + '</div>' +
+            '<div class="broker-gate-banner-main">' + esc(gateDetail.reasonText) + '</div>' +
+            '<div class="broker-gate-banner-meta">' +
+              (gateDetail.brokerName ? '<span>' + esc(t("observationGateBroker")) + ': ' + esc(String(gateDetail.brokerName).toUpperCase()) + '</span>' : '') +
+              (gateDetail.status ? '<span>' + esc(t("observationGateStatus")) + ': ' + esc(gateDetail.status) + '</span>' : '') +
+              (gateDetail.code ? '<span>' + esc(t("observationGateCode")) + ': ' + esc(gateDetail.code) + '</span>' : '') +
+            '</div>' +
+            '<div class="broker-gate-banner-message">' + esc(gateDetail.message) + '</div>' +
+          '</div>'
+        : '') +
+      (!gateDetail && executionPolicyDetail
+        ? '<div class="broker-gate-banner">' +
+            '<div class="broker-gate-banner-title">' + esc(t("brokerExecPolicyBannerTitle")) + '</div>' +
+            '<div class="broker-gate-banner-main">' + esc(executionPolicyDetail.status || executionPolicyDetail.message) + '</div>' +
+            '<div class="broker-gate-banner-meta">' +
+              (executionPolicyDetail.code ? '<span>' + esc(t("observationGateCode")) + ': ' + esc(executionPolicyDetail.code) + '</span>' : '') +
+              (executionPolicyDetail.value ? '<span>' + esc(executionPolicyDetail.valueLabel) + ': ' + esc(executionPolicyDetail.value) + '</span>' : '') +
+              (executionPolicyDetail.limit ? '<span>' + esc(executionPolicyDetail.limitLabel) + ': ' + esc(executionPolicyDetail.limit) + '</span>' : '') +
+            '</div>' +
+            '<div class="broker-gate-banner-message">' + esc(executionPolicyDetail.message) + '</div>' +
+          '</div>'
+        : '') +
+      '<div class="broker-policy-box">' +
+        '<div class="broker-policy-title">' + esc(t("brokerPolicyTitle")) + '</div>' +
+        '<div class="broker-policy-grid">' +
+          '<span>' + esc(t("brokerPolicyRole")) + ': ' + esc(brokerPolicyRoleText(policy.required_role)) + '</span>' +
+          '<span>' + esc(t("brokerPolicySnapshotCover")) + ': ' + esc(brokerPolicyBoolText(policy.require_snapshot_cover_market_date)) + '</span>' +
+          '<span>' + esc(t("brokerPolicyReconciliationCover")) + ': ' + esc(brokerPolicyBoolText(policy.require_reconciliation_cover_market_date)) + '</span>' +
+          '<span>' + esc(t("brokerPolicySnapshotLag")) + ': ' + esc(String(policy.max_snapshot_lag_days || 0)) + ' ' + esc(t("brokerPolicyLagUnit")) + '</span>' +
+          '<span>' + esc(t("brokerPolicyReconciliationLag")) + ': ' + esc(String(policy.max_reconciliation_lag_days || 0)) + ' ' + esc(t("brokerPolicyLagUnit")) + '</span>' +
+        '</div>' +
+      '</div>' +
+      (liveExecutionPolicy
+        ? '<div class="broker-policy-box">' +
+            '<div class="broker-policy-title">' + esc(t("brokerExecPolicyMatrixTitle")) + '</div>' +
+            '<div class="broker-policy-grid">' +
+              '<span>' + esc(t("brokerExecPolicyEnabled")) + ': ' + esc(t(liveExecutionPolicy.enabled ? "brokerExecPolicyEnabledOn" : "brokerExecPolicyEnabledOff")) + '</span>' +
+              '<span>' + esc(t("brokerExecPolicyAssets")) + ': ' + esc((liveExecutionPolicy.allowed_assets || []).join(", ") || "--") + '</span>' +
+              '<span>' + esc(t("brokerExecPolicySides")) + ': ' + esc((liveExecutionPolicy.allowed_order_sides || []).join(", ") || "--") + '</span>' +
+              '<span>' + esc(t("brokerExecPolicySingleOrder")) + ': ' + esc((currencySymbol || "") + formatNum(liveExecutionPolicy.max_single_order_notional)) + '</span>' +
+              '<span>' + esc(t("brokerExecPolicyOrderCount")) + ': ' + esc(String(liveExecutionPolicy.max_daily_order_count || 0)) + '</span>' +
+              '<span>' + esc(t("brokerExecPolicyTurnover")) + ': ' + esc(formatPercentValue(liveExecutionPolicy.max_daily_turnover_ratio)) + '</span>' +
+            '</div>' +
+          '</div>'
+        : '') +
+      '<div class="broker-sync-overall-note">' + esc(t("brokerReadonlyHint")) + '</div>' +
+    '</div>';
+
+  summaryEl.innerHTML = syncData.roles.map(function(role) {
+    var valueLine = role.total_value == null
+      ? esc(t("brokerNoSyncYet"))
+      : esc((role.currency || currencySymbol || "") + formatNum(role.total_value));
+    var cashLine = role.cash == null
+      ? "--"
+      : esc((role.currency || currencySymbol || "") + formatNum(role.cash));
+    var isBlockedPrimary = gateDetail && role.role === "primary";
+
+    return '' +
+      '<div class="broker-sync-card level-' + esc(role.level) + '">' +
+        '<div class="broker-sync-card-header">' +
+          '<div class="broker-sync-title-group">' +
+            '<div class="broker-sync-role">' + esc(brokerRoleText(role.role)) + '</div>' +
+            '<div class="broker-sync-broker">' + esc((role.broker_name || role.configured_broker || "").toUpperCase()) + '</div>' +
+          '</div>' +
+          '<span class="badge ' + brokerBadgeClass(role.level) + '">' + esc(brokerLevelText(role.level)) + '</span>' +
+        '</div>' +
+        '<div class="broker-sync-value">' + valueLine + '</div>' +
+        '<div class="broker-sync-meta">' +
+          '<span>' + esc(t("brokerConfigured")) + ': ' + esc((role.configured_broker || "").toUpperCase()) + '</span>' +
+          '<span>' + esc(t("brokerAccount")) + ': ' + esc(role.account_id_masked || "--") + '</span>' +
+          '<span>' + esc(t("brokerCash")) + ': ' + cashLine + '</span>' +
+          '<span>' + esc(t("brokerLastCheck")) + ': ' + esc(formatSyncTime(role.last_sync_at)) + '</span>' +
+          '<span>' + esc(t("brokerDiffCount")) + ': ' + esc(String(role.difference_count || 0)) + '</span>' +
+          '<span>' + esc(t("brokerAnomalyStreakRuns")) + ': ' + esc(String(role.anomaly_streak_runs || 0)) + '</span>' +
+          '<span>' + esc(t("brokerDriftStreakDays")) + ': ' + esc(String(role.drift_streak_days || 0)) + '</span>' +
+        '</div>' +
+        (isBlockedPrimary
+          ? '<div class="broker-card-gate">' +
+              '<div class="broker-card-gate-title">' + esc(t("brokerBlockedToday")) + '</div>' +
+              '<div class="broker-card-gate-reason">' + esc(gateDetail.reasonText) + '</div>' +
+            '</div>'
+          : '') +
+      '</div>';
+  }).join("");
+
+  if (!syncData.anomalies || !syncData.anomalies.length) {
+    anomaliesEl.innerHTML = emptyStateHTML("✅", "brokerNoAnomalies", "brokerNoAnomaliesHint");
+  } else {
+    anomaliesEl.innerHTML = syncData.anomalies.map(function(item) {
+      return '' +
+        '<div class="event-item broker-anomaly-item severity-' + esc(item.severity) + '">' +
+          '<div class="broker-anomaly-head">' +
+            '<span class="broker-anomaly-broker">' + esc(brokerRoleText(item.role)) + ' · ' + esc((item.broker_name || "").toUpperCase()) + '</span>' +
+            '<div class="broker-anomaly-tags">' +
+              '<span class="broker-anomaly-key">' + esc(item.category + ":" + item.key) + '</span>' +
+              '<span class="broker-anomaly-severity severity-' + esc(item.severity) + '">' + esc(brokerSeverityText(item.severity)) + '</span>' +
+            '</div>' +
+          '</div>' +
+          '<div class="broker-anomaly-message">' + esc(item.message || "") + '</div>' +
+        '</div>';
+    }).join("");
+  }
+
+  var historyByRole = syncData.history_by_role || {};
+  timelineEl.innerHTML =
+    renderBrokerHistoryColumn("primary", historyByRole.primary || [], currencySymbol) +
+    renderBrokerHistoryColumn("backup", historyByRole.backup || [], currencySymbol);
+}
+
+function renderCoreObservationHistory(coreObservation, currencySymbol) {
+  var el = document.getElementById("core-observation-history");
+  if (!el) return;
+
+  var history = (coreObservation && coreObservation.history) || [];
+  if (!history.length) {
+    el.innerHTML = emptyStateHTML("🕰️", "coreHistoryEmpty", "coreHistoryHint");
+    return;
+  }
+
+  el.innerHTML = history.map(function(item) {
+    var gate = item.broker_sync_gate || null;
+    var executionPolicyGate = item.execution_policy_gate || null;
+    var postRecon = item.post_execution_reconciliation || null;
+    var policy = item.broker_sync_policy || null;
+    var liveExecutionPolicy = item.live_execution_policy || null;
+    var headline = item.action || t("coreHistoryNoAction");
+    if (gate && gate.message) headline = gate.message;
+    else if (executionPolicyGate && executionPolicyGate.message) headline = executionPolicyGate.message;
+    else if (postRecon && postRecon.status === "BROKEN") headline = item.action || t("observationCorePostReconCriticalHeadline");
+    else if (postRecon && postRecon.status === "DRIFT") headline = item.action || t("observationCorePostReconWarningHeadline");
+    var navText = item.nav == null
+      ? "--"
+      : (currencySymbol || "") + formatNum(item.nav);
+
+    return '' +
+      '<div class="core-timeline-item level-' + esc(item.level || "missing") + '">' +
+        '<div class="core-timeline-marker"></div>' +
+        '<div class="core-timeline-card">' +
+          '<div class="core-timeline-top">' +
+            '<div>' +
+              '<div class="core-timeline-title">' + esc(item.date || "--") + ' · ' + esc(coreRunStatusText(item.status, item.level)) + '</div>' +
+              '<div class="core-timeline-time">' + esc(formatSyncTime(item.timestamp)) + '</div>' +
+            '</div>' +
+            '<span class="badge ' + brokerBadgeClass(item.level || "missing") + '">' + esc(observationStatusText(item.level || "missing")) + '</span>' +
+          '</div>' +
+          '<div class="core-timeline-headline">' + esc(headline) + '</div>' +
+          '<div class="core-timeline-metrics">' +
+            '<span>' + esc(t("observationNav")) + ': ' + esc(navText) + '</span>' +
+            (item.state ? '<span>' + esc(t("status")) + ': ' + esc(item.state) + '</span>' : '') +
+            (gate && gate.code ? '<span>' + esc(t("observationGateCode")) + ': ' + esc(gate.code) + '</span>' : '') +
+            (executionPolicyGate && executionPolicyGate.code ? '<span>' + esc(t("observationExecPolicyStatus")) + ': ' + esc(executionPolicyGateReasonText(executionPolicyGate.code)) + '</span>' : '') +
+            (postRecon && postRecon.status ? '<span>' + esc(t("observationPostReconStatus")) + ': ' + esc(postExecutionReconciliationStatusText(postRecon.status)) + '</span>' : '') +
+            (postRecon && postRecon.status ? '<span>' + esc(t("observationPostReconDiffCount")) + ': ' + esc(String(postRecon.difference_count || 0)) + '</span>' : '') +
+          '</div>' +
+          (policy
+            ? '<div class="core-timeline-policy">' + esc(t("coreHistoryPolicy")) + ': ' + esc(summarizeBrokerPolicy(policy)) + '</div>'
+            : '') +
+          (liveExecutionPolicy
+            ? '<div class="core-timeline-policy">' + esc(t("brokerExecPolicyMatrixTitle")) + ': ' + esc(summarizeLiveExecutionPolicy(liveExecutionPolicy, currencySymbol)) + '</div>'
+            : '') +
+        '</div>' +
+      '</div>';
   }).join("");
 }
 
