@@ -1,3 +1,4 @@
+import json
 import tempfile
 from pathlib import Path
 
@@ -109,3 +110,54 @@ def test_save_and_load_insurance_decision(temp_db):
     assert stored["new_state"] == "PROTECTED"
     assert stored["risk_score"] == pytest.approx(0.55)
     assert "drawdown protection" in stored["reasons"]
+
+
+def test_notifier_prefers_insurance_state_for_protection_messages():
+    from engine.notifier import format_message
+
+    report = {
+        "date": "2026-12-30",
+        "state": "IDLE",
+        "action": "风险保护已触发",
+        "nav": 100000.0,
+        "drawdown": 0.05,
+        "spy_tlt_corr": 0.1,
+        "protection_count": 1,
+        "insurance": {"state": "LOCKED"},
+    }
+
+    message = format_message(report)
+
+    assert message is not None
+    assert "LOCKED" in message
+
+
+def test_generate_report_prefers_daily_run_insurance_state(temp_db, capsys, monkeypatch):
+    import runner.report as report_module
+
+    temp_db.ensure_portfolio("us", ["SPY", "TLT", "GLD", "SHV"])
+    temp_db.save_snapshot(
+        date="2026-12-30",
+        state="IDLE",
+        nav=100000.0,
+        positions=[25000.0, 25000.0, 25000.0, 25000.0],
+        weights=[0.25, 0.25, 0.25, 0.25],
+        drawdown=0.0,
+        spy_tlt_corr=0.1,
+        action=None,
+        trigger_reason=None,
+        portfolio_id="us",
+    )
+    temp_db.record_run(
+        "2026-12-30",
+        "SUCCESS",
+        json.dumps({"insurance": {"state": "LOCKED"}}),
+        portfolio_id="us",
+    )
+
+    monkeypatch.setattr(report_module, "Database", lambda: temp_db)
+    report_module.generate_report(days=0, portfolio_id="us")
+    output = capsys.readouterr().out
+
+    assert "当前状态:" in output
+    assert "LOCKED" in output

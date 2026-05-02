@@ -106,6 +106,24 @@ def calc_underwater(navs: list[float]) -> tuple[int, int]:
     return max_uw, current_uw
 
 
+def _latest_authoritative_insurance_state(db: Database, portfolio_id: str) -> str | None:
+    latest_run = db.get_latest_daily_run(portfolio_id)
+    if not latest_run:
+        return None
+
+    raw_report = latest_run.get("report")
+    if not raw_report:
+        return None
+
+    try:
+        payload = json.loads(raw_report)
+    except (TypeError, json.JSONDecodeError):
+        return None
+
+    insurance = payload.get("insurance", {}) or {}
+    return insurance.get("state") or payload.get("insurance_state")
+
+
 # ── 主报告 ────────────────────────────────────────────
 
 def generate_report(days: int = 0, portfolio_id: str = "default"):
@@ -164,7 +182,13 @@ def generate_report(days: int = 0, portfolio_id: str = "default"):
 
     # ── 头部 ──────────────────────────────────────────
     period = f"最近 {days} 天" if days > 0 else "全部历史"
-    state_label = "IDLE (正常)" if last["state"] == "IDLE" else "PROTECTION (保护中) ⚠"
+    insurance_state = _latest_authoritative_insurance_state(db, portfolio_id)
+    authoritative_state = insurance_state or last["state"]
+    state_label = f"{authoritative_state} (权威状态)"
+    if authoritative_state == "IDLE":
+        state_label = "IDLE (正常)"
+    elif authoritative_state in {"PROTECTION", "PROTECTED", "EMERGENCY", "LOCKED"}:
+        state_label = f"{authoritative_state} (保护中) ⚠"
 
     print()
     print("=" * 68)

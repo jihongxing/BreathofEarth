@@ -33,6 +33,11 @@ logger = logging.getLogger("xirang.notifier")
 # ── 消息格式化 ────────────────────────────────────────
 
 
+def _authoritative_state(report: dict) -> str:
+    insurance = report.get("insurance", {}) or {}
+    return insurance.get("state") or report.get("insurance_state") or report.get("state", "UNKNOWN")
+
+
 def format_rebalance_message(report: dict) -> str:
     """常规再平衡通知"""
     weights = report.get("weights", {})
@@ -54,6 +59,7 @@ def format_execution_alert(report: dict) -> str:
     """执行异常告警。"""
     execution = report.get("execution", {})
     manual_reasons = report.get("manual_intervention_reasons") or []
+    state = _authoritative_state(report)
     detail = (
         (manual_reasons[0].get("message") if manual_reasons else None)
         or execution.get("message")
@@ -65,6 +71,7 @@ def format_execution_alert(report: dict) -> str:
         f"━━━━━━━━━━━━━━━\n"
         f"日期: {report['date']}\n"
         f"状态: {report.get('run_status', 'UNKNOWN')}\n"
+        f"保险态: {state}\n"
         f"组合: {report.get('name', report.get('portfolio', '-'))}\n"
         f"原因: {detail}\n"
         f"NAV: ${report['nav']:,.2f}\n"
@@ -76,12 +83,13 @@ def format_protection_message(report: dict) -> str:
     """风控警报通知"""
     weights = report.get("weights", {})
     w_str = " | ".join(f"{k} {v:.1%}" for k, v in weights.items())
+    state = _authoritative_state(report)
 
     return (
         f"🚨 息壤 · 风控警报\n"
         f"━━━━━━━━━━━━━━━\n"
         f"日期: {report['date']}\n"
-        f"状态: {report['state']}\n"
+        f"状态: {state}\n"
         f"操作: {report['action']}\n"
         f"NAV: ${report['nav']:,.2f}\n"
         f"回撤: {report['drawdown']:.2%}\n"
@@ -104,10 +112,10 @@ def format_message(report: dict) -> Optional[str]:
     if run_status in ("FAILED_EXECUTION", "PENDING_EXECUTION", "MANUAL_INTERVENTION_REQUIRED"):
         return format_execution_alert(report)
 
-    state = report.get("state", "IDLE")
+    state = _authoritative_state(report)
     if action is None:
         return None
-    if state == "PROTECTION" or ("保护" in str(action)) or ("避险" in str(action)):
+    if state in {"PROTECTION", "PROTECTED", "EMERGENCY", "LOCKED"} or ("保护" in str(action)) or ("避险" in str(action)):
         return format_protection_message(report)
 
     # 普通阈值再平衡/年末再平衡保持静默，避免把用户拉进交易节奏。
