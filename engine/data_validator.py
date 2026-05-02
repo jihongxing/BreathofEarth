@@ -15,11 +15,24 @@ import pandas as pd
 from typing import Optional
 
 from engine.config import ASSETS
+from engine.insurance import InsuranceSignal, SignalSeverity
 
 
 class DataValidationError(Exception):
     """数据校验失败，系统应中止运行"""
     pass
+
+
+def build_data_integrity_signal(ok: bool, reason: str, evidence: dict) -> InsuranceSignal:
+    return InsuranceSignal(
+        source="data",
+        severity=SignalSeverity.INFO if ok else SignalSeverity.CRITICAL,
+        score=0.0 if ok else 1.0,
+        weight=1.0,
+        hard_veto=not ok,
+        reason=reason,
+        evidence=evidence,
+    )
 
 
 def validate_prices(prices: pd.DataFrame, assets: list = None) -> None:

@@ -31,6 +31,7 @@ from engine.config import (
     LAYER_TARGET_CORE, LAYER_TARGET_STABILITY,
     LAYER_MIN_STABILITY, LAYER_MAX_STABILITY, LAYER_TARGET_ALPHA,
 )
+from engine.insurance import InsuranceSignal, SignalSeverity
 
 logger = logging.getLogger("xirang.cashflow")
 
@@ -38,6 +39,26 @@ MIN_DEPOSIT = 100.0
 MAX_DEPOSIT_NAV_RATIO = 5.0
 MAX_DEPOSIT_HARD_CAP = 5_000_000.0
 MAX_WITHDRAWAL_NAV_RATIO = 0.9
+
+
+def build_stability_signal(stability_balance: float, nav: float) -> InsuranceSignal:
+    ratio = stability_balance / nav if nav > 0 else 0.0
+    below_floor = ratio < LAYER_MIN_STABILITY
+
+    return InsuranceSignal(
+        source="stability",
+        severity=SignalSeverity.WARNING if below_floor else SignalSeverity.INFO,
+        score=0.60 if below_floor else 0.0,
+        weight=0.25,
+        hard_veto=False,
+        reason="Stability below minimum floor" if below_floor else "Stability normal",
+        evidence={
+            "stability_balance": stability_balance,
+            "nav": nav,
+            "stability_ratio": ratio,
+            "min_stability": LAYER_MIN_STABILITY,
+        },
+    )
 
 
 class CashflowResult:

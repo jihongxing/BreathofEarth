@@ -16,6 +16,7 @@ from engine.config import (
     HARD_STOP_DD,
     RISK_CORR_THRESHOLD,
 )
+from engine.insurance import InsuranceSignal, SignalSeverity
 
 
 @dataclass
@@ -87,4 +88,36 @@ class RiskEngine:
             is_protection=is_protection,
             is_corr_breakdown=is_corr_breakdown,
             trigger_reason=trigger_reason,
+        )
+
+    def to_insurance_signal(self, signal: RiskSignal) -> InsuranceSignal:
+        if signal.is_hard_stop:
+            severity = SignalSeverity.ERROR
+            score = 0.80
+        elif signal.is_protection:
+            severity = SignalSeverity.ERROR
+            score = 0.55
+        elif signal.is_corr_breakdown:
+            severity = SignalSeverity.WARNING
+            score = 0.45
+        else:
+            severity = SignalSeverity.INFO
+            score = max(0.0, min(abs(signal.current_dd), 0.20))
+
+        return InsuranceSignal(
+            source="market",
+            severity=severity,
+            score=score,
+            weight=0.40,
+            hard_veto=False,
+            reason=signal.trigger_reason or "market risk normal",
+            evidence={
+                "drawdown": signal.current_dd,
+                "spy_tlt_corr": signal.spy_tlt_corr,
+                "spy_30d_ret": signal.spy_30d_ret,
+                "tlt_30d_ret": signal.tlt_30d_ret,
+                "is_hard_stop": signal.is_hard_stop,
+                "is_protection": signal.is_protection,
+                "is_corr_breakdown": signal.is_corr_breakdown,
+            },
         )
