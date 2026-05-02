@@ -317,3 +317,32 @@ def validate_recovery_proposal(
         return TransitionDecision(False, "missing recovery audit evidence")
 
     return TransitionDecision(True, "recovery proposal valid")
+
+
+class InsuranceLayer:
+    def __init__(self, current_state: InsuranceState = InsuranceState.SAFE):
+        self.current_state = current_state
+
+    def evaluate(
+        self,
+        signals: list[InsuranceSignal],
+        approved_recovery: bool = False,
+    ) -> tuple[InsuranceAssessment, InsuranceDecision]:
+        assessment = assess_insurance_state(self.current_state, signals)
+        transition = validate_state_transition(
+            current=self.current_state,
+            proposed=assessment.state,
+            approved_recovery=approved_recovery,
+        )
+
+        if transition.allowed:
+            self.current_state = assessment.state
+            decision_state = assessment.state
+        else:
+            decision_state = self.current_state
+
+        reasons = list(assessment.reasons)
+        if not transition.allowed:
+            reasons.append(transition.reason)
+
+        return assessment, build_authority_decision(decision_state, reasons=reasons)

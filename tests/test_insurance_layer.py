@@ -5,6 +5,7 @@ import pytest
 from engine.insurance import (
     assess_insurance_state,
     build_authority_decision,
+    InsuranceLayer,
     InsuranceSignal,
     InsuranceState,
     RecoveryProposal,
@@ -217,3 +218,25 @@ def test_locked_recovery_to_emergency_with_evidence_is_allowed():
 
     assert result.allowed is True
     assert result.reason == "recovery proposal valid"
+
+
+def test_insurance_layer_returns_assessment_and_authority_decision():
+    layer = InsuranceLayer(current_state=InsuranceState.SAFE)
+    signals = [
+        InsuranceSignal(
+            source="market",
+            severity=SignalSeverity.WARNING,
+            score=0.7,
+            weight=0.4,
+            hard_veto=False,
+            reason="market stress",
+            evidence={},
+        )
+    ]
+
+    assessment, decision = layer.evaluate(signals)
+
+    assert assessment.state == InsuranceState.DEGRADED
+    assert decision.state == InsuranceState.DEGRADED
+    assert decision.force_cash_floor is True
+    assert layer.current_state == InsuranceState.DEGRADED
