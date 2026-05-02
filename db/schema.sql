@@ -75,3 +75,21 @@ CREATE TABLE IF NOT EXISTS daily_runs (
 
 -- 初始化默认组合
 INSERT OR IGNORE INTO portfolios (id) VALUES ('default');
+
+-- Insurance Layer 决策审计
+CREATE TABLE IF NOT EXISTS insurance_decisions (
+    id TEXT PRIMARY KEY,
+    portfolio_id TEXT NOT NULL DEFAULT 'us',
+    previous_state TEXT NOT NULL,
+    new_state TEXT NOT NULL,
+    risk_score REAL NOT NULL DEFAULT 0,
+    hard_blocks TEXT NOT NULL DEFAULT '[]',
+    allowed_actions TEXT NOT NULL DEFAULT '{}',
+    blocked_actions TEXT NOT NULL DEFAULT '{}',
+    forced_actions TEXT NOT NULL DEFAULT '{}',
+    reasons TEXT NOT NULL DEFAULT '[]',
+    source_signals TEXT NOT NULL DEFAULT '[]',
+    recovery_proposal_id TEXT,
+    actor TEXT NOT NULL DEFAULT 'insurance',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);

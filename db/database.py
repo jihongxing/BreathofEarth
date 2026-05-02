@@ -6,6 +6,7 @@ SQLite 封装，负责持久化组合状态、快照、交易记录。
 
 import sqlite3
 import json
+import uuid
 from pathlib import Path
 from typing import Optional
 from contextlib import contextmanager
@@ -416,6 +417,96 @@ class Database:
                 (portfolio_id, limit),
             ).fetchall()
             return [dict(r) for r in rows]
+
+    # ── Insurance Layer 审计 ──────────────────────────
+
+    def save_insurance_decision(
+        self,
+        portfolio_id: str,
+        previous_state: str,
+        decision,
+        risk_score: float,
+        hard_blocks: list,
+        source_signals: list,
+        actor: str = "insurance",
+        recovery_proposal_id: str | None = None,
+        conn=None,
+    ) -> str:
+        decision_id = str(uuid.uuid4())[:12]
+        allowed_actions = {
+            "allow_observation": decision.allow_observation,
+            "allow_suggestions": decision.allow_suggestions,
+            "allow_core_rebalance": decision.allow_core_rebalance,
+            "allow_risk_reducing_rebalance": decision.allow_risk_reducing_rebalance,
+            "allow_live_execution": decision.allow_live_execution,
+            "allow_alpha_execution": decision.allow_alpha_execution,
+            "allow_withdrawal_request": decision.allow_withdrawal_request,
+            "allow_withdrawal_approval": decision.allow_withdrawal_approval,
+            "allow_withdrawal_execution": decision.allow_withdrawal_execution,
+            "allow_deposit": decision.allow_deposit,
+            "allow_tax_harvest": decision.allow_tax_harvest,
+        }
+        forced_actions = {
+            "force_de_risk": decision.force_de_risk,
+            "force_cash_floor": decision.force_cash_floor,
+        }
+        blocked_actions = {
+            "block_trading": decision.block_trading,
+            "freeze_execution": decision.freeze_execution,
+            "require_manual_review": decision.require_manual_review,
+            "require_recovery_proposal": decision.require_recovery_proposal,
+        }
+        values = (
+            decision_id,
+            portfolio_id,
+            previous_state,
+            decision.state.value,
+            float(risk_score),
+            json.dumps(hard_blocks, ensure_ascii=False),
+            json.dumps(allowed_actions, ensure_ascii=False),
+            json.dumps(blocked_actions, ensure_ascii=False),
+            json.dumps(forced_actions, ensure_ascii=False),
+            json.dumps(decision.reasons, ensure_ascii=False),
+            json.dumps(source_signals, ensure_ascii=False, default=str),
+            recovery_proposal_id,
+            actor,
+        )
+        sql = """
+            INSERT INTO insurance_decisions (
+                id, portfolio_id, previous_state, new_state, risk_score,
+                hard_blocks, allowed_actions, blocked_actions, forced_actions,
+                reasons, source_signals, recovery_proposal_id, actor
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+
+        if conn:
+            conn.execute(sql, values)
+        else:
+            with self._conn() as c:
+                c.execute(sql, values)
+        return decision_id
+
+    def get_insurance_decision(self, decision_id: str) -> dict | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM insurance_decisions WHERE id = ?",
+                (decision_id,),
+            ).fetchone()
+
+        if not row:
+            return None
+
+        data = dict(row)
+        for key in (
+            "hard_blocks",
+            "allowed_actions",
+            "blocked_actions",
+            "forced_actions",
+            "reasons",
+            "source_signals",
+        ):
+            data[key] = json.loads(data[key])
+        return data
 
     # ── 券商同步与对账 ────────────────────────────────
 

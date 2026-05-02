@@ -85,3 +85,27 @@ def test_protected_decision_blocks_alpha_arena_execution(temp_db):
 
     assert result["action"] == "BLOCKED"
     assert result["reason"] == "Insurance Layer blocked Alpha execution"
+
+
+def test_save_and_load_insurance_decision(temp_db):
+    decision = build_authority_decision(
+        InsuranceState.PROTECTED,
+        reasons=["drawdown protection"],
+    )
+
+    decision_id = temp_db.save_insurance_decision(
+        portfolio_id="us",
+        previous_state="SAFE",
+        decision=decision,
+        risk_score=0.55,
+        hard_blocks=[],
+        source_signals=[{"source": "market", "reason": "drawdown protection"}],
+        actor="insurance",
+    )
+
+    stored = temp_db.get_insurance_decision(decision_id)
+
+    assert stored["portfolio_id"] == "us"
+    assert stored["new_state"] == "PROTECTED"
+    assert stored["risk_score"] == pytest.approx(0.55)
+    assert "drawdown protection" in stored["reasons"]
