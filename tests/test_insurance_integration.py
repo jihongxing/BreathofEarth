@@ -1,9 +1,23 @@
+import tempfile
+from pathlib import Path
+
 import pytest
 
+from db.database import Database
 from engine.cashflow import build_stability_signal
 from engine.data_validator import build_data_integrity_signal
-from engine.insurance import SignalSeverity
+from engine.insurance import build_authority_decision, InsuranceState, SignalSeverity
 from engine.risk import RiskEngine
+
+
+@pytest.fixture
+def temp_db():
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = Path(f.name)
+
+    db = Database(db_path)
+    yield db
+    db_path.unlink()
 
 
 def test_risk_engine_emits_market_signal_for_drawdown():
@@ -47,3 +61,27 @@ def test_data_integrity_signal_can_represent_failure():
     assert signal.source == "data"
     assert signal.severity == SignalSeverity.CRITICAL
     assert signal.hard_veto is True
+
+
+def test_locked_decision_blocks_withdrawal_execution_before_capital_moves(temp_db):
+    from engine.cashflow import CashflowEngine
+
+    engine = CashflowEngine(temp_db)
+    decision = build_authority_decision(InsuranceState.LOCKED, reasons=["locked"])
+
+    result = engine.enforce_withdrawal_authority(decision)
+
+    assert result.status == "ERROR"
+    assert "Insurance Layer blocked withdrawal execution" in result.message
+
+
+def test_protected_decision_blocks_alpha_arena_execution(temp_db):
+    from engine.alpha.arena import StrategyArena
+
+    arena = StrategyArena(temp_db)
+    decision = build_authority_decision(InsuranceState.PROTECTED, reasons=["protected"])
+
+    result = arena.enforce_alpha_authority(decision)
+
+    assert result["action"] == "BLOCKED"
+    assert result["reason"] == "Insurance Layer blocked Alpha execution"

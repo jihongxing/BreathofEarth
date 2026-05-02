@@ -19,6 +19,7 @@ import logging
 from datetime import datetime, timedelta
 from db.database import Database
 from engine.alpha.registry import REGISTRY, get_strategy_class
+from engine.insurance import InsuranceDecision
 
 logger = logging.getLogger("xirang.alpha.arena")
 
@@ -41,13 +42,38 @@ class StrategyArena:
         cls = REGISTRY.get(strategy_id)
         return bool(cls and cls.FORMAL_REPORTING_ELIGIBLE)
 
-    def run_all(self, portfolio_id: str, current_date: str, spy_price: float) -> list[dict]:
+    def enforce_alpha_authority(self, decision: InsuranceDecision) -> dict:
+        if not decision.allow_alpha_execution:
+            return {
+                "action": "BLOCKED",
+                "reason": "Insurance Layer blocked Alpha execution",
+                "insurance_state": decision.state.value,
+                "reasons": decision.reasons,
+            }
+        return {
+            "action": "ALLOWED",
+            "reason": "Insurance Layer allowed Alpha execution",
+            "insurance_state": decision.state.value,
+        }
+
+    def run_all(
+        self,
+        portfolio_id: str,
+        current_date: str,
+        spy_price: float,
+        insurance_decision: InsuranceDecision | None = None,
+    ) -> list[dict]:
         """
         运行所有 ENABLED 策略。
 
         Returns:
             每个策略的执行结果列表
         """
+        if insurance_decision is not None:
+            authority = self.enforce_alpha_authority(insurance_decision)
+            if authority["action"] == "BLOCKED":
+                return [authority]
+
         results = []
         for strategy_id, cls in REGISTRY.items():
             instance = cls(self.db)

@@ -31,7 +31,7 @@ from engine.config import (
     LAYER_TARGET_CORE, LAYER_TARGET_STABILITY,
     LAYER_MIN_STABILITY, LAYER_MAX_STABILITY, LAYER_TARGET_ALPHA,
 )
-from engine.insurance import InsuranceSignal, SignalSeverity
+from engine.insurance import InsuranceDecision, InsuranceSignal, SignalSeverity
 
 logger = logging.getLogger("xirang.cashflow")
 
@@ -86,6 +86,16 @@ class CashflowEngine:
 
     def _get_total_nav(self, core_sum: float, stability: float) -> float:
         return core_sum + stability
+
+    def enforce_withdrawal_authority(self, decision: InsuranceDecision) -> CashflowResult:
+        if not decision.allow_withdrawal_execution:
+            return CashflowResult(
+                "ERROR",
+                "Insurance Layer blocked withdrawal execution",
+                insurance_state=decision.state.value,
+                reasons=decision.reasons,
+            )
+        return CashflowResult("SUCCESS", "Insurance Layer allowed withdrawal execution")
 
     def deposit_preview(
         self, amount: float, portfolio_id: str = "us"
@@ -437,8 +447,16 @@ class CashflowEngine:
         )
 
     def execute_withdrawal(
-        self, withdrawal_id: str, executor: str
+        self,
+        withdrawal_id: str,
+        executor: str,
+        insurance_decision: InsuranceDecision | None = None,
     ) -> CashflowResult:
+        if insurance_decision is not None:
+            authority = self.enforce_withdrawal_authority(insurance_decision)
+            if authority.status == "ERROR":
+                return authority
+
         withdrawal = self.db.get_withdrawal_request(withdrawal_id)
         if not withdrawal:
             return CashflowResult("ERROR", "出金请求不存在")
