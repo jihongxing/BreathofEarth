@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta
+
 import pytest
 
 from engine.insurance import (
@@ -5,8 +7,11 @@ from engine.insurance import (
     build_authority_decision,
     InsuranceSignal,
     InsuranceState,
+    RecoveryProposal,
+    RecoveryStatus,
     SignalSeverity,
     TransitionDecision,
+    validate_recovery_proposal,
     validate_state_transition,
 )
 
@@ -152,3 +157,63 @@ def test_hard_veto_forces_locked_even_when_score_is_low():
     assert assessment.state == InsuranceState.LOCKED
     assert assessment.risk_score == pytest.approx(0.01)
     assert assessment.hard_blocks == ["BROKER_RECONCILIATION_BROKEN"]
+
+
+def _approved_recovery_proposal(**overrides):
+    now = datetime(2026, 5, 2, 10, 0, 0)
+    data = {
+        "id": "rec-001",
+        "portfolio_id": "us",
+        "from_state": InsuranceState.LOCKED,
+        "proposed_to_state": InsuranceState.EMERGENCY,
+        "created_at": now - timedelta(days=2),
+        "cooldown_until": now - timedelta(hours=1),
+        "validation_evidence": {
+            "data_integrity": "restored",
+            "broker_reconciliation": "MATCHED",
+        },
+        "unresolved_blocks": [],
+        "required_approvals": 2,
+        "approvals": ["alice", "bob"],
+        "audit_log_ids": ["audit-1"],
+        "status": RecoveryStatus.APPROVED,
+    }
+    data.update(overrides)
+    return RecoveryProposal(**data), now
+
+
+def test_locked_recovery_requires_approval_count():
+    proposal, now = _approved_recovery_proposal(approvals=["alice"])
+
+    result = validate_recovery_proposal(proposal, now=now)
+
+    assert result.allowed is False
+    assert result.reason == "insufficient recovery approvals"
+
+
+def test_locked_recovery_requires_audit_evidence():
+    proposal, now = _approved_recovery_proposal(audit_log_ids=[])
+
+    result = validate_recovery_proposal(proposal, now=now)
+
+    assert result.allowed is False
+    assert result.reason == "missing recovery audit evidence"
+
+
+def test_locked_recovery_requires_cooldown():
+    now = datetime(2026, 5, 2, 10, 0, 0)
+    proposal, _ = _approved_recovery_proposal(cooldown_until=now + timedelta(hours=1))
+
+    result = validate_recovery_proposal(proposal, now=now)
+
+    assert result.allowed is False
+    assert result.reason == "recovery cooldown still active"
+
+
+def test_locked_recovery_to_emergency_with_evidence_is_allowed():
+    proposal, now = _approved_recovery_proposal()
+
+    result = validate_recovery_proposal(proposal, now=now)
+
+    assert result.allowed is True
+    assert result.reason == "recovery proposal valid"

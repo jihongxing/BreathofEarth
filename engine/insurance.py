@@ -5,6 +5,7 @@ docs/specs/insurance-layer-executable-spec.md
 """
 
 from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
 
 
@@ -259,3 +260,60 @@ def assess_insurance_state(
         hard_blocks=hard_blocks,
         reasons=[signal.reason for signal in signals],
     )
+
+
+class RecoveryStatus(str, Enum):
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+    EXPIRED = "EXPIRED"
+    EXECUTED = "EXECUTED"
+
+
+@dataclass(frozen=True)
+class RecoveryProposal:
+    id: str
+    portfolio_id: str
+    from_state: InsuranceState
+    proposed_to_state: InsuranceState
+    created_at: datetime
+    cooldown_until: datetime
+    validation_evidence: dict
+    unresolved_blocks: list[str]
+    required_approvals: int
+    approvals: list[str]
+    audit_log_ids: list[str]
+    status: RecoveryStatus
+
+
+def validate_recovery_proposal(
+    proposal: RecoveryProposal,
+    now: datetime,
+) -> TransitionDecision:
+    transition = validate_state_transition(
+        current=proposal.from_state,
+        proposed=proposal.proposed_to_state,
+        approved_recovery=True,
+    )
+    if not transition.allowed:
+        return transition
+
+    if proposal.status != RecoveryStatus.APPROVED:
+        return TransitionDecision(False, "recovery proposal is not approved")
+
+    if len(set(proposal.approvals)) < proposal.required_approvals:
+        return TransitionDecision(False, "insufficient recovery approvals")
+
+    if now < proposal.cooldown_until:
+        return TransitionDecision(False, "recovery cooldown still active")
+
+    if proposal.unresolved_blocks:
+        return TransitionDecision(False, "recovery has unresolved hard blocks")
+
+    if not proposal.validation_evidence:
+        return TransitionDecision(False, "missing recovery validation evidence")
+
+    if not proposal.audit_log_ids:
+        return TransitionDecision(False, "missing recovery audit evidence")
+
+    return TransitionDecision(True, "recovery proposal valid")
