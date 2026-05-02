@@ -1,8 +1,11 @@
 import pytest
 
 from engine.insurance import (
+    assess_insurance_state,
     build_authority_decision,
+    InsuranceSignal,
     InsuranceState,
+    SignalSeverity,
     TransitionDecision,
     validate_state_transition,
 )
@@ -94,3 +97,58 @@ def test_safe_allows_normal_operations_when_no_blocks_exist():
     assert decision.allow_alpha_execution is True
     assert decision.allow_withdrawal_execution is True
     assert decision.block_trading is False
+
+
+def test_weighted_risk_score_is_reproducible():
+    signals = [
+        InsuranceSignal(
+            source="market",
+            severity=SignalSeverity.WARNING,
+            score=0.4,
+            weight=0.5,
+            hard_veto=False,
+            reason="drawdown warning",
+            evidence={"drawdown": -0.08},
+        ),
+        InsuranceSignal(
+            source="stability",
+            severity=SignalSeverity.WARNING,
+            score=0.6,
+            weight=0.25,
+            hard_veto=False,
+            reason="cash buffer low",
+            evidence={"stability_ratio": 0.04},
+        ),
+    ]
+
+    assessment = assess_insurance_state(
+        current_state=InsuranceState.SAFE,
+        signals=signals,
+    )
+
+    assert assessment.risk_score == pytest.approx(0.35)
+    assert assessment.state == InsuranceState.DEGRADED
+    assert assessment.hard_blocks == []
+
+
+def test_hard_veto_forces_locked_even_when_score_is_low():
+    signals = [
+        InsuranceSignal(
+            source="broker",
+            severity=SignalSeverity.CRITICAL,
+            score=0.1,
+            weight=0.1,
+            hard_veto=True,
+            reason="BROKER_RECONCILIATION_BROKEN",
+            evidence={"status": "BROKEN"},
+        )
+    ]
+
+    assessment = assess_insurance_state(
+        current_state=InsuranceState.SAFE,
+        signals=signals,
+    )
+
+    assert assessment.state == InsuranceState.LOCKED
+    assert assessment.risk_score == pytest.approx(0.01)
+    assert assessment.hard_blocks == ["BROKER_RECONCILIATION_BROKEN"]

@@ -200,3 +200,62 @@ def build_authority_decision(
         require_recovery_proposal=True,
         reasons=reasons,
     )
+
+
+class SignalSeverity(str, Enum):
+    INFO = "INFO"
+    WARNING = "WARNING"
+    ERROR = "ERROR"
+    CRITICAL = "CRITICAL"
+
+
+@dataclass(frozen=True)
+class InsuranceSignal:
+    source: str
+    severity: SignalSeverity
+    score: float
+    weight: float
+    hard_veto: bool
+    reason: str
+    evidence: dict
+
+
+@dataclass(frozen=True)
+class InsuranceAssessment:
+    state: InsuranceState
+    risk_score: float
+    weighted_signals: list[InsuranceSignal]
+    hard_blocks: list[str]
+    reasons: list[str]
+
+
+def _state_from_weighted_score(current_state: InsuranceState, score: float) -> InsuranceState:
+    if score >= 0.75:
+        return InsuranceState.EMERGENCY
+    if score >= 0.50:
+        return InsuranceState.PROTECTED
+    if score >= 0.25:
+        return InsuranceState.DEGRADED
+    return current_state
+
+
+def assess_insurance_state(
+    current_state: InsuranceState,
+    signals: list[InsuranceSignal],
+) -> InsuranceAssessment:
+    weighted = [signal for signal in signals if not signal.hard_veto]
+    hard_blocks = [signal.reason for signal in signals if signal.hard_veto]
+    risk_score = sum(signal.score * signal.weight for signal in signals)
+
+    if hard_blocks:
+        state = InsuranceState.LOCKED
+    else:
+        state = _state_from_weighted_score(current_state, risk_score)
+
+    return InsuranceAssessment(
+        state=state,
+        risk_score=risk_score,
+        weighted_signals=weighted,
+        hard_blocks=hard_blocks,
+        reasons=[signal.reason for signal in signals],
+    )
