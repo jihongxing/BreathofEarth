@@ -501,6 +501,62 @@ def test_insurance_locked_blocks_core_rebalance(temp_db, monkeypatch):
     assert "Insurance Layer blocked Core rebalance" in result["action"]
 
 
+def test_locked_insurance_state_persists_legacy_portfolio_protection(temp_db, monkeypatch):
+    temp_db.ensure_portfolio("us", ["SPY", "TLT", "GLD", "SHV"])
+    _seed_broker_sync(temp_db, checked_day="2026-12-30")
+
+    class LockedInsuranceLayer:
+        def __init__(self, current_state=None):
+            pass
+
+        def evaluate(self, signals, approved_recovery=False):
+            from engine.insurance import InsuranceAssessment, InsuranceDecision, InsuranceState
+
+            assessment = InsuranceAssessment(
+                state=InsuranceState.LOCKED,
+                risk_score=1.0,
+                weighted_signals=[],
+                hard_blocks=["AUTHORITY_BYPASS_ATTEMPT"],
+                reasons=["test locked"],
+            )
+            decision = InsuranceDecision(
+                state=InsuranceState.LOCKED,
+                allow_observation=True,
+                allow_suggestions=True,
+                allow_core_rebalance=False,
+                allow_risk_reducing_rebalance=False,
+                allow_live_execution=False,
+                allow_alpha_execution=False,
+                allow_withdrawal_request=False,
+                allow_withdrawal_approval=False,
+                allow_withdrawal_execution=False,
+                allow_deposit=False,
+                allow_tax_harvest=False,
+                force_de_risk=False,
+                force_cash_floor=False,
+                block_trading=True,
+                freeze_execution=True,
+                require_manual_review=True,
+                require_recovery_proposal=True,
+                reasons=["test locked"],
+            )
+            return assessment, decision
+
+    monkeypatch.setattr(runner_module, "MarketDataService", _make_market_service("2026-12-30"))
+    monkeypatch.setattr(runner_module, "InsuranceLayer", LockedInsuranceLayer)
+    monkeypatch.setattr(runner_module, "notify", lambda report: None)
+    monkeypatch.setenv("XIRANG_EXECUTOR", "auto")
+
+    result = runner_module.DailyRunner(temp_db).run_portfolio("us")
+    portfolio = temp_db.get_portfolio("us")
+    snapshots = temp_db.get_snapshots("us", limit=1)
+
+    assert result["insurance"]["state"] == "LOCKED"
+    assert result["state"] == "PROTECTION"
+    assert portfolio["state"] == "PROTECTION"
+    assert snapshots[0]["state"] == "PROTECTION"
+
+
 def test_year_end_rebalance_only_triggers_once_per_year(temp_db, monkeypatch):
     temp_db.ensure_portfolio("us", ["SPY", "TLT", "GLD", "SHV"])
     _seed_broker_sync(temp_db, checked_day="2026-12-30")

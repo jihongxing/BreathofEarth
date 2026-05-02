@@ -27,7 +27,11 @@ from engine.data_validator import DataValidationError, validate_prices, validate
 from engine.execution.base import ExecutionResult, OrderSide, OrderStatus
 from engine.execution.factory import create_executor, get_broker_topology
 from engine.execution.sync import BrokerSyncService
-from engine.insurance import InsuranceLayer, InsuranceState
+from engine.insurance import (
+    InsuranceLayer,
+    InsuranceState,
+    portfolio_state_from_insurance_state,
+)
 from engine.market_data import MarketDataService
 from engine.notifier import notify
 from engine.portfolio import PortfolioEngine
@@ -622,6 +626,9 @@ class DailyRunner:
         ]
         insurance = InsuranceLayer(current_state=InsuranceState.SAFE)
         insurance_assessment, insurance_decision = insurance.evaluate(insurance_signals)
+        compatibility_portfolio_state = portfolio_state_from_insurance_state(
+            insurance_decision.state
+        )
 
         current_prices = {asset: float(prices[asset].iloc[-1]) for asset in assets}
 
@@ -827,7 +834,7 @@ class DailyRunner:
             "date": today,
             "portfolio": portfolio_id,
             "name": name,
-            "state": engine.state,
+            "state": compatibility_portfolio_state,
             "nav": round(engine.nav, 2),
             "core_nav": round(engine.core_nav, 2),
             "stability_balance": round(float(engine.stability_balance), 2),
@@ -903,7 +910,7 @@ class DailyRunner:
             with self.db.transaction() as conn:
                 self.db.update_portfolio(
                     portfolio_id=portfolio_id,
-                    state=engine.state,
+                    state=compatibility_portfolio_state,
                     nav=engine.nav,
                     positions=json.dumps(engine.positions.tolist()),
                     stability_balance=engine.stability_balance,
@@ -915,7 +922,7 @@ class DailyRunner:
                 )
                 self.db.save_snapshot(
                     date=today,
-                    state=engine.state,
+                    state=compatibility_portfolio_state,
                     nav=engine.nav,
                     positions=engine.positions.tolist(),
                     weights=engine.weights.tolist(),

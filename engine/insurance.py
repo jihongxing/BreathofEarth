@@ -346,3 +346,9 @@ class InsuranceLayer:
             reasons.append(transition.reason)
 
         return assessment, build_authority_decision(decision_state, reasons=reasons)
+
+
+def portfolio_state_from_insurance_state(state: InsuranceState) -> str:
+    if state in {InsuranceState.SAFE, InsuranceState.DEGRADED}:
+        return "IDLE"
+    return "PROTECTION"

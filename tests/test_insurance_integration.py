@@ -161,3 +161,13 @@ def test_generate_report_prefers_daily_run_insurance_state(temp_db, capsys, monk
 
     assert "当前状态:" in output
     assert "LOCKED" in output
+
+
+def test_portfolio_state_maps_from_insurance_state_for_compatibility():
+    from engine.insurance import portfolio_state_from_insurance_state
+
+    assert portfolio_state_from_insurance_state(InsuranceState.SAFE) == "IDLE"
+    assert portfolio_state_from_insurance_state(InsuranceState.DEGRADED) == "IDLE"
+    assert portfolio_state_from_insurance_state(InsuranceState.PROTECTED) == "PROTECTION"
+    assert portfolio_state_from_insurance_state(InsuranceState.EMERGENCY) == "PROTECTION"
+    assert portfolio_state_from_insurance_state(InsuranceState.LOCKED) == "PROTECTION"
