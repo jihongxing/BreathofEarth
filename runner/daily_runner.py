@@ -21,11 +21,13 @@ from pathlib import Path
 import numpy as np
 
 from db.database import Database
+from engine.cashflow import build_stability_signal
 from engine.config import MAX_EXECUTION_SLIPPAGE_PCT, PORTFOLIOS
 from engine.data_validator import DataValidationError, validate_prices, validate_returns
 from engine.execution.base import ExecutionResult, OrderSide, OrderStatus
 from engine.execution.factory import create_executor, get_broker_topology
 from engine.execution.sync import BrokerSyncService
+from engine.insurance import InsuranceLayer, InsuranceState
 from engine.market_data import MarketDataService
 from engine.notifier import notify
 from engine.portfolio import PortfolioEngine
@@ -611,6 +613,16 @@ class DailyRunner:
         if risk_signal.trigger_reason:
             logger.warning(f"  ⚠ 风控: {risk_signal.trigger_reason}")
 
+        insurance_signals = [
+            risk.to_insurance_signal(risk_signal),
+            build_stability_signal(
+                stability_balance=float(engine.stability_balance),
+                nav=sim_nav,
+            ),
+        ]
+        insurance = InsuranceLayer(current_state=InsuranceState.SAFE)
+        insurance_assessment, insurance_decision = insurance.evaluate(insurance_signals)
+
         current_prices = {asset: float(prices[asset].iloc[-1]) for asset in assets}
 
         engine.apply_daily_returns(daily_returns)
@@ -648,7 +660,17 @@ class DailyRunner:
                 total_nav=engine.core_nav,
                 current_prices=current_prices,
             )
-            if executor_mode == "manual" and not self._interactive_core_mode_allowed():
+            if not insurance_decision.allow_core_rebalance:
+                execution_status = "FAILED"
+                action = "Insurance Layer blocked Core rebalance"
+                tx_type = "REBALANCE_BLOCKED"
+                execution_policy_gate = {
+                    "code": "INSURANCE_CORE_REBALANCE_BLOCKED",
+                    "message": action,
+                    "insurance_state": insurance_decision.state.value,
+                    "reasons": insurance_decision.reasons,
+                }
+            elif executor_mode == "manual" and not self._interactive_core_mode_allowed():
                 execution_status = "FAILED"
                 action = "策略拦截: Core 常规调仓不允许人工确认模式"
                 tx_type = "REBALANCE_BLOCKED"
@@ -821,6 +843,12 @@ class DailyRunner:
             "manual_intervention_reasons": manual_intervention_reasons,
             "broker_sync_policy": self._get_broker_sync_policy(portfolio_id),
             "live_execution_policy": self._get_live_execution_policy(portfolio_id),
+            "insurance": {
+                "state": insurance_decision.state.value,
+                "risk_score": round(float(insurance_assessment.risk_score), 6),
+                "hard_blocks": insurance_assessment.hard_blocks,
+                "reasons": insurance_decision.reasons,
+            },
         }
 
         if execution_result is not None:
