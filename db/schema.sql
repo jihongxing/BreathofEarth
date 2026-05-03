@@ -93,3 +93,21 @@ CREATE TABLE IF NOT EXISTS insurance_decisions (
     actor TEXT NOT NULL DEFAULT 'insurance',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS insurance_recovery_proposals (
+    id TEXT PRIMARY KEY,
+    portfolio_id TEXT NOT NULL DEFAULT 'us',
+    from_state TEXT NOT NULL,
+    proposed_to_state TEXT NOT NULL,
+    proposal_created_at TEXT NOT NULL,
+    cooldown_until TEXT NOT NULL,
+    validation_evidence TEXT NOT NULL DEFAULT '{}',
+    unresolved_blocks TEXT NOT NULL DEFAULT '[]',
+    required_approvals INTEGER NOT NULL DEFAULT 1,
+    approvals TEXT NOT NULL DEFAULT '[]',
+    audit_log_ids TEXT NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL,
+    actor TEXT NOT NULL DEFAULT 'insurance',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);

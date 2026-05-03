@@ -50,7 +50,7 @@ class GridTradingStrategy(AlphaStrategy):
     GRID_SPACING = 0.02        # 每格 2%
     STOP_LOSS_PCT = -0.10      # 止损 -10%
 
-    def run(self, portfolio_id: str, current_date: str, spy_price: float) -> dict:
+    def _run(self, portfolio_id: str, current_date: str, spy_price: float) -> dict:
         """
         每个交易日检查网格触发。
 

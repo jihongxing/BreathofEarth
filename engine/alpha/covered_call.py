@@ -98,7 +98,7 @@ class CoveredCallStrategy(AlphaStrategy):
     IMPLIED_VOL = 0.18       # 假设隐含波动率
     CONTRACTS_PER_100 = 100  # 每张合约对应 100 股
 
-    def run(self, portfolio_id: str, current_date: str, spy_price: float) -> dict:
+    def _run(self, portfolio_id: str, current_date: str, spy_price: float) -> dict:
         """
         执行备兑期权策略。
 

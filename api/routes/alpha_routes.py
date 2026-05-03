@@ -14,9 +14,58 @@ from typing import Optional
 from db.database import Database
 from engine.alpha.registry import get_strategy_class, list_available_strategies, REGISTRY
 from engine.alpha.arena import StrategyArena
+from engine.insurance import build_authority_decision, build_missing_authority_decision, coerce_insurance_state
 from api.deps import get_db, get_current_user, require_role
 
 router = APIRouter(prefix="/api/alpha", tags=["Alpha 沙盒"])
+
+
+def _latest_insurance_authority(db: Database, portfolio_id: str):
+    latest = db.get_latest_insurance_decision(portfolio_id)
+    if latest:
+        decision = build_authority_decision(
+            coerce_insurance_state(latest.get("new_state")),
+            reasons=latest.get("reasons", []),
+        )
+        return decision, latest.get("id")
+    return build_missing_authority_decision("missing persisted InsuranceDecision"), None
+
+
+def _latest_insurance_decision(db: Database, portfolio_id: str):
+    return _latest_insurance_authority(db, portfolio_id)[0]
+
+
+def _require_alpha_authority(db: Database, portfolio_id: str):
+    decision, decision_id = _latest_insurance_authority(db, portfolio_id)
+    if not decision.allow_alpha_execution:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "message": "Insurance Layer blocked Alpha execution",
+                "insurance_state": decision.state.value,
+                "reasons": decision.reasons,
+            },
+        )
+    return decision, decision_id
+
+
+def _require_alpha_cashflow_authority(db: Database, portfolio_id: str, action: str):
+    decision, decision_id = _latest_insurance_authority(db, portfolio_id)
+    allowed = {
+        "deposit": decision.allow_deposit,
+        "withdraw_request": decision.allow_withdrawal_request,
+        "withdraw_execution": decision.allow_withdrawal_execution,
+    }.get(action, False)
+    if not allowed:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "message": f"Insurance Layer blocked Alpha cashflow {action}",
+                "insurance_state": decision.state.value,
+                "reasons": decision.reasons,
+            },
+        )
+    return decision, decision_id
 
 
 class StrategyToggleRequest(BaseModel):
@@ -86,20 +135,30 @@ async def fund_alpha_ledger(
     user: dict = Depends(require_role("admin")),
 ):
     """手工向 Alpha 独立账本注入实验资金"""
+    _, insurance_decision_id = _require_alpha_cashflow_authority(db, portfolio_id, "deposit")
+
     if req.amount <= 0:
         raise HTTPException(status_code=400, detail="入账金额必须大于 0")
 
-    entry, account = db.record_alpha_ledger_entry(
-        portfolio_id=portfolio_id,
-        direction="IN",
-        amount=req.amount,
-        actor=user["username"],
-        note=req.note or f"Alpha 入账 +{req.amount:.2f}",
-    )
+    try:
+        entry, account = db.record_alpha_ledger_entry(
+            portfolio_id=portfolio_id,
+            direction="IN",
+            amount=req.amount,
+            actor=user["username"],
+            insurance_decision_id=insurance_decision_id,
+            note=req.note or f"Alpha 入账 +{req.amount:.2f}",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     db.save_audit_log(
         "ALPHA_LEDGER_FUND",
         user["username"],
-        f"组合 {portfolio_id} Alpha 账本入账 ${req.amount:,.2f}" + (f"，备注: {req.note}" if req.note else ""),
+        (
+            f"组合 {portfolio_id} Alpha 账本入账 ${req.amount:,.2f}"
+            + (f"，备注: {req.note}" if req.note else "")
+            + f" | InsuranceDecision={insurance_decision_id}"
+        ),
     )
     return {
         "message": f"组合 {portfolio_id} Alpha 账本入账成功",
@@ -129,12 +188,16 @@ async def create_alpha_ledger_entry(
     user: dict = Depends(require_role("admin")),
 ):
     """登记 Alpha 人工入账/出账流水。仅用于线下资金动作补记。"""
+    action = "deposit" if req.direction == "IN" else "withdraw_execution"
+    _, insurance_decision_id = _require_alpha_cashflow_authority(db, portfolio_id, action)
+
     try:
         entry, account = db.record_alpha_ledger_entry(
             portfolio_id=portfolio_id,
             direction=req.direction,
             amount=req.amount,
             actor=user["username"],
+            insurance_decision_id=insurance_decision_id,
             note=req.note,
             external_reference=req.external_reference,
             related_request_id=req.related_request_id,
@@ -149,7 +212,8 @@ async def create_alpha_ledger_entry(
         f"组合 {portfolio_id} Alpha 人工{'入账' if req.direction == 'IN' else '出账'} ${req.amount:,.2f}"
         + (f"，备注: {req.note}" if req.note else "")
         + (f"，外部流水: {req.external_reference}" if req.external_reference else "")
-        + (f"，关联申请: {req.related_request_id}" if req.related_request_id else ""),
+        + (f"，关联申请: {req.related_request_id}" if req.related_request_id else "")
+        + f" | InsuranceDecision={insurance_decision_id}",
     )
     return {
         "message": f"组合 {portfolio_id} Alpha 人工{'入账' if req.direction == 'IN' else '出账'}已登记",
@@ -168,6 +232,8 @@ async def withdraw_alpha_ledger(
     user: dict = Depends(require_role("admin")),
 ):
     """发起 Alpha 账本出金申请。系统只登记请求，不自动执行扣账。"""
+    _, insurance_decision_id = _require_alpha_cashflow_authority(db, portfolio_id, "withdraw_request")
+
     if req.amount <= 0:
         raise HTTPException(status_code=400, detail="申请金额必须大于 0")
 
@@ -188,7 +254,11 @@ async def withdraw_alpha_ledger(
     db.save_audit_log(
         "ALPHA_LEDGER_WITHDRAW_REQUEST",
         user["username"],
-        f"组合 {portfolio_id} Alpha 账本出金申请 ${req.amount:,.2f}" + (f"，原因: {reason}" if reason else ""),
+        (
+            f"组合 {portfolio_id} Alpha 账本出金申请 ${req.amount:,.2f}"
+            + (f"，原因: {reason}" if reason else "")
+            + f" | InsuranceDecision={insurance_decision_id}"
+        ),
     )
     return {
         "message": f"组合 {portfolio_id} Alpha 出金申请已登记，系统不会自动扣减账本，请线下人工处理",
@@ -241,6 +311,15 @@ async def update_alpha_withdrawal_request_status(
     if request["status"] != "PENDING_MANUAL":
         raise HTTPException(status_code=400, detail=f"当前状态为 {request['status']}，不能重复回填")
 
+    if req.status == "HANDLED":
+        _, insurance_decision_id = _require_alpha_cashflow_authority(
+            db,
+            request["portfolio_id"],
+            "withdraw_execution",
+        )
+    else:
+        insurance_decision_id = None
+
     db.update_alpha_withdrawal_request(
         request_id,
         status=req.status,
@@ -254,7 +333,8 @@ async def update_alpha_withdrawal_request_status(
         user["username"],
         f"组合 {request['portfolio_id']} Alpha 出金申请 #{request_id} 已回填为 {req.status}"
         + (f"，备注: {req.note}" if req.note else "")
-        + (f"，外部流水: {req.external_reference}" if req.external_reference else ""),
+        + (f"，外部流水: {req.external_reference}" if req.external_reference else "")
+        + (f" | InsuranceDecision={insurance_decision_id}" if insurance_decision_id else ""),
     )
 
     updated = db.get_alpha_withdrawal_request(request_id)
@@ -325,15 +405,29 @@ async def toggle_strategy(
     instance.ensure_registered(portfolio_id)
 
     new_status = "ENABLED" if req.action == "enable" else "DISABLED"
-    db.update_strategy_status(strategy_id, new_status, portfolio_id=portfolio_id)
+    insurance_decision_id = None
+    if new_status == "ENABLED" or req.allocation_pct is not None:
+        _, insurance_decision_id = _require_alpha_authority(db, portfolio_id)
+    db.update_strategy_status(
+        strategy_id,
+        new_status,
+        portfolio_id=portfolio_id,
+        insurance_decision_id=insurance_decision_id,
+    )
 
     if req.allocation_pct is not None:
-        db.upsert_strategy(strategy_id, portfolio_id=portfolio_id, allocation_pct=req.allocation_pct)
+        db.upsert_strategy(
+            strategy_id,
+            portfolio_id=portfolio_id,
+            allocation_pct=req.allocation_pct,
+            insurance_decision_id=insurance_decision_id,
+        )
 
     db.save_audit_log(
         f"ALPHA_{new_status}", user["username"],
         f"组合 {portfolio_id} 的策略 {strategy_id} 已{'启用' if new_status == 'ENABLED' else '禁用'}"
-        + (f"，分配 {req.allocation_pct:.0%}" if req.allocation_pct else ""),
+        + (f"，分配 {req.allocation_pct:.0%}" if req.allocation_pct else "")
+        + (f" | InsuranceDecision={insurance_decision_id}" if insurance_decision_id else ""),
     )
 
     return {
@@ -354,6 +448,8 @@ async def run_strategy(
     user: dict = Depends(require_role("admin")),
 ):
     """手动触发策略执行（仅 admin，策略必须 ENABLED）"""
+    _, insurance_decision_id = _require_alpha_authority(db, portfolio_id)
+
     cls = get_strategy_class(strategy_id)
     if not cls:
         raise HTTPException(status_code=404, detail=f"策略 {strategy_id} 不存在")
@@ -376,7 +472,10 @@ async def run_strategy(
 
     db.save_audit_log(
         "ALPHA_RUN", user["username"],
-        f"手动触发组合 {portfolio_id} 的策略 {strategy_id}: {result.get('action', 'N/A')}",
+        (
+            f"手动触发组合 {portfolio_id} 的策略 {strategy_id}: {result.get('action', 'N/A')} "
+            f"| InsuranceDecision={insurance_decision_id}"
+        ),
     )
 
     return result
@@ -451,8 +550,17 @@ async def run_evaluation(
     user: dict = Depends(require_role("admin")),
 ):
     """手动触发季度评估（仅 admin）"""
+    _, insurance_decision_id = _require_alpha_authority(db, portfolio_id)
     arena = StrategyArena(db)
-    report = arena.quarterly_evaluation(portfolio_id=portfolio_id)
+    report = arena.quarterly_evaluation(
+        portfolio_id=portfolio_id,
+        insurance_decision_id=insurance_decision_id,
+    )
+    db.save_audit_log(
+        "ARENA_EVALUATE",
+        user["username"],
+        f"手动触发组合 {portfolio_id} Alpha 季度评估 | InsuranceDecision={insurance_decision_id}",
+    )
     return report
 
 
@@ -466,6 +574,8 @@ async def run_all_strategies(
     user: dict = Depends(require_role("admin")),
 ):
     """运行所有已启用的策略（仅 admin）"""
+    _, insurance_decision_id = _require_alpha_authority(db, portfolio_id)
+
     if spy_price is None:
         spy_price = 450.0
 
@@ -481,7 +591,10 @@ async def run_all_strategies(
 
     db.save_audit_log(
         "ARENA_RUN_ALL", user["username"],
-        f"批量运行组合 {portfolio_id} 的 {len(results)} 个策略",
+        (
+            f"批量运行组合 {portfolio_id} 的 {len(results)} 个策略 "
+            f"| InsuranceDecision={insurance_decision_id}"
+        ),
     )
 
     return {"strategies_run": len(results), "results": results}

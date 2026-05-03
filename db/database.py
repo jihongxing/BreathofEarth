@@ -7,9 +7,17 @@ SQLite 封装，负责持久化组合状态、快照、交易记录。
 import sqlite3
 import json
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 from contextlib import contextmanager
+
+from engine.insurance import (
+    RecoveryProposal,
+    RecoveryStatus,
+    build_authority_decision,
+    coerce_insurance_state,
+)
 
 
 DB_PATH = Path(__file__).parent / "xirang.db"
@@ -25,6 +33,8 @@ SCHEMA_BROKER_EXECUTION_PATH = Path(__file__).parent / "schema_broker_execution.
 class Database:
     def __init__(self, db_path: Optional[Path] = None):
         self.db_path = db_path or DB_PATH
+        self._alpha_authority_stack: list[str] = []
+        self._insurance_writer_stack: list[str] = []
         self._init_db()
 
     def _init_db(self):
@@ -80,6 +90,16 @@ class Database:
             if "last_manual_adjustment" not in account_cols:
                 conn.execute("ALTER TABLE alpha_accounts ADD COLUMN last_manual_adjustment TEXT")
 
+        if self._table_exists(conn, "alpha_ledger_entries"):
+            ledger_cols = {c["name"] for c in self._table_columns(conn, "alpha_ledger_entries")}
+            if "insurance_decision_id" not in ledger_cols:
+                conn.execute("ALTER TABLE alpha_ledger_entries ADD COLUMN insurance_decision_id TEXT")
+
+        if self._table_exists(conn, "alpha_transactions"):
+            tx_cols = {c["name"] for c in self._table_columns(conn, "alpha_transactions")}
+            if "insurance_decision_id" not in tx_cols:
+                conn.execute("ALTER TABLE alpha_transactions ADD COLUMN insurance_decision_id TEXT")
+
         if self._table_exists(conn, "alpha_strategies"):
             strategy_cols = self._table_columns(conn, "alpha_strategies")
             pk_cols = [c["name"] for c in strategy_cols if c["pk"]]
@@ -131,6 +151,7 @@ class Database:
                 pnl REAL NOT NULL DEFAULT 0,
                 spy_price REAL,
                 detail TEXT,
+                insurance_decision_id TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             """
@@ -239,6 +260,36 @@ class Database:
             raise
         finally:
             conn.close()
+
+    @contextmanager
+    def alpha_authority(self, insurance_decision_id: str):
+        if not insurance_decision_id:
+            raise ValueError("Alpha 操作缺少 InsuranceDecision 授权")
+        self._alpha_authority_stack.append(insurance_decision_id)
+        try:
+            yield insurance_decision_id
+        finally:
+            self._alpha_authority_stack.pop()
+
+    def _current_alpha_authority_id(self) -> str | None:
+        if not self._alpha_authority_stack:
+            return None
+        return self._alpha_authority_stack[-1]
+
+    @contextmanager
+    def insurance_decision_writer(self, actor: str):
+        if actor not in {"daily_runner", "test"}:
+            raise ValueError(f"不允许的 InsuranceDecision 写入者: {actor}")
+        self._insurance_writer_stack.append(actor)
+        try:
+            yield actor
+        finally:
+            self._insurance_writer_stack.pop()
+
+    def _current_insurance_writer(self) -> str | None:
+        if not self._insurance_writer_stack:
+            return None
+        return self._insurance_writer_stack[-1]
 
     # ── 组合状态 ──────────────────────────────────────
 
@@ -432,6 +483,14 @@ class Database:
         recovery_proposal_id: str | None = None,
         conn=None,
     ) -> str:
+        writer = self._current_insurance_writer()
+        if writer is None:
+            raise ValueError("InsuranceDecision 写入必须通过受控写入上下文")
+        if actor == "insurance":
+            actor = writer
+        elif actor != writer:
+            raise ValueError("InsuranceDecision actor 与写入上下文不匹配")
+
         decision_id = str(uuid.uuid4())[:12]
         allowed_actions = {
             "allow_observation": decision.allow_observation,
@@ -507,6 +566,110 @@ class Database:
         ):
             data[key] = json.loads(data[key])
         return data
+
+    def get_latest_insurance_decision(self, portfolio_id: str = "us") -> dict | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                """SELECT * FROM insurance_decisions
+                   WHERE portfolio_id = ?
+                   ORDER BY created_at DESC, rowid DESC
+                   LIMIT 1""",
+                (portfolio_id,),
+            ).fetchone()
+
+        if not row:
+            return None
+
+        data = dict(row)
+        for key in (
+            "hard_blocks",
+            "allowed_actions",
+            "blocked_actions",
+            "forced_actions",
+            "reasons",
+            "source_signals",
+        ):
+            data[key] = json.loads(data[key])
+        return data
+
+    # ── Insurance Recovery Proposals ───────────────────
+
+    def save_recovery_proposal(self, proposal: RecoveryProposal, actor: str = "insurance", conn=None) -> str:
+        values = (
+            proposal.id,
+            proposal.portfolio_id,
+            proposal.from_state.value,
+            proposal.proposed_to_state.value,
+            proposal.created_at.isoformat(),
+            proposal.cooldown_until.isoformat(),
+            json.dumps(proposal.validation_evidence, ensure_ascii=False),
+            json.dumps(proposal.unresolved_blocks, ensure_ascii=False),
+            int(proposal.required_approvals),
+            json.dumps(proposal.approvals, ensure_ascii=False),
+            json.dumps(proposal.audit_log_ids, ensure_ascii=False),
+            proposal.status.value,
+            actor,
+        )
+        sql = """
+            INSERT INTO insurance_recovery_proposals (
+                id, portfolio_id, from_state, proposed_to_state, proposal_created_at,
+                cooldown_until, validation_evidence, unresolved_blocks,
+                required_approvals, approvals, audit_log_ids, status, actor
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                portfolio_id = excluded.portfolio_id,
+                from_state = excluded.from_state,
+                proposed_to_state = excluded.proposed_to_state,
+                proposal_created_at = excluded.proposal_created_at,
+                cooldown_until = excluded.cooldown_until,
+                validation_evidence = excluded.validation_evidence,
+                unresolved_blocks = excluded.unresolved_blocks,
+                required_approvals = excluded.required_approvals,
+                approvals = excluded.approvals,
+                audit_log_ids = excluded.audit_log_ids,
+                status = excluded.status,
+                actor = excluded.actor,
+                updated_at = CURRENT_TIMESTAMP
+        """
+        if conn:
+            conn.execute(sql, values)
+        else:
+            with self._conn() as c:
+                c.execute(sql, values)
+        return proposal.id
+
+    def get_recovery_proposal(self, proposal_id: str) -> dict | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM insurance_recovery_proposals WHERE id = ?",
+                (proposal_id,),
+            ).fetchone()
+        if not row:
+            return None
+
+        data = dict(row)
+        for key in ("validation_evidence", "unresolved_blocks", "approvals", "audit_log_ids"):
+            data[key] = json.loads(data[key])
+        return data
+
+    def load_recovery_proposal(self, proposal_id: str) -> RecoveryProposal | None:
+        data = self.get_recovery_proposal(proposal_id)
+        if not data:
+            return None
+        return RecoveryProposal(
+            id=data["id"],
+            portfolio_id=data["portfolio_id"],
+            from_state=coerce_insurance_state(data["from_state"]),
+            proposed_to_state=coerce_insurance_state(data["proposed_to_state"]),
+            created_at=datetime.fromisoformat(data["proposal_created_at"]),
+            cooldown_until=datetime.fromisoformat(data["cooldown_until"]),
+            validation_evidence=data["validation_evidence"],
+            unresolved_blocks=data["unresolved_blocks"],
+            required_approvals=int(data["required_approvals"]),
+            approvals=data["approvals"],
+            audit_log_ids=data["audit_log_ids"],
+            status=RecoveryStatus(data["status"]),
+        )
 
     # ── 券商同步与对账 ────────────────────────────────
 
@@ -1098,29 +1261,29 @@ class Database:
                 "last_manual_adjustment": None,
             }
 
-    def update_alpha_account(self, portfolio_id: str = "us", conn=None, **kwargs):
+    def _update_alpha_account(self, portfolio_id: str = "us", conn=None, **kwargs):
+        if conn is None:
+            raise ValueError("Alpha 账本账户更新必须在受控 ledger 事务内执行")
         sets = ", ".join(f"{k} = ?" for k in kwargs)
         values = list(kwargs.values()) + [portfolio_id]
         sql = f"UPDATE alpha_accounts SET {sets}, updated_at = CURRENT_TIMESTAMP WHERE portfolio_id = ?"
 
-        if conn:
-            conn.execute(
-                "INSERT OR IGNORE INTO alpha_accounts (portfolio_id) VALUES (?)",
-                (portfolio_id,),
-            )
-            conn.execute(sql, values)
-        else:
-            self.ensure_alpha_account(portfolio_id)
-            with self._conn() as c:
-                c.execute(sql, values)
+        conn.execute(
+            "INSERT OR IGNORE INTO alpha_accounts (portfolio_id) VALUES (?)",
+            (portfolio_id,),
+        )
+        conn.execute(sql, values)
 
-    def adjust_alpha_account_balance(
+    def _adjust_alpha_account_balance(
         self,
         portfolio_id: str,
         delta: float,
         note: str = "",
         conn=None,
     ) -> dict:
+        if conn is None:
+            raise ValueError("Alpha 账本余额调整必须在受控 ledger 事务内执行")
+
         if conn:
             conn.execute(
                 "INSERT OR IGNORE INTO alpha_accounts (portfolio_id) VALUES (?)",
@@ -1137,9 +1300,6 @@ class Database:
                 "total_outflows": 0.0,
                 "last_manual_adjustment": None,
             }
-        else:
-            self.ensure_alpha_account(portfolio_id)
-            account = self.get_alpha_account(portfolio_id)
         new_balance = float(account.get("cash_balance", 0.0)) + delta
         if new_balance < 0:
             raise ValueError(f"Alpha 账本余额不足，调整后将为 {new_balance:.2f}")
@@ -1151,7 +1311,7 @@ class Database:
         else:
             outflows += abs(delta)
 
-        self.update_alpha_account(
+        self._update_alpha_account(
             portfolio_id=portfolio_id,
             cash_balance=round(new_balance, 2),
             total_inflows=round(inflows, 2),
@@ -1159,19 +1319,17 @@ class Database:
             last_manual_adjustment=note,
             conn=conn,
         )
-        if conn:
-            row = conn.execute(
-                "SELECT * FROM alpha_accounts WHERE portfolio_id = ?",
-                (portfolio_id,),
-            ).fetchone()
-            return dict(row) if row else {
-                "portfolio_id": portfolio_id,
-                "cash_balance": round(new_balance, 2),
-                "total_inflows": round(inflows, 2),
-                "total_outflows": round(outflows, 2),
-                "last_manual_adjustment": note,
-            }
-        return self.get_alpha_account(portfolio_id)
+        row = conn.execute(
+            "SELECT * FROM alpha_accounts WHERE portfolio_id = ?",
+            (portfolio_id,),
+        ).fetchone()
+        return dict(row) if row else {
+            "portfolio_id": portfolio_id,
+            "cash_balance": round(new_balance, 2),
+            "total_inflows": round(inflows, 2),
+            "total_outflows": round(outflows, 2),
+            "last_manual_adjustment": note,
+        }
 
     def record_alpha_ledger_entry(
         self,
@@ -1179,6 +1337,7 @@ class Database:
         direction: str,
         amount: float,
         actor: str,
+        insurance_decision_id: str,
         note: str = "",
         external_reference: str = "",
         related_request_id: str = "",
@@ -1188,12 +1347,17 @@ class Database:
             raise ValueError(f"不支持的 Alpha 账本方向: {direction}")
         if amount <= 0:
             raise ValueError("记账金额必须大于 0")
+        self._require_alpha_ledger_insurance_authority(
+            portfolio_id=portfolio_id,
+            direction=direction,
+            insurance_decision_id=insurance_decision_id,
+        )
 
         delta = amount if direction == "IN" else -amount
         entry_note = note or (f"Alpha 人工入账 +{amount:.2f}" if direction == "IN" else f"Alpha 人工出账 -{amount:.2f}")
 
         with self.transaction() as conn:
-            account = self.adjust_alpha_account_balance(
+            account = self._adjust_alpha_account_balance(
                 portfolio_id=portfolio_id,
                 delta=delta,
                 note=entry_note,
@@ -1202,8 +1366,8 @@ class Database:
             cursor = conn.execute(
                 """INSERT INTO alpha_ledger_entries
                    (portfolio_id, direction, amount, balance_after, note,
-                    external_reference, related_request_id, actor)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    external_reference, related_request_id, insurance_decision_id, actor)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     portfolio_id,
                     direction,
@@ -1212,12 +1376,60 @@ class Database:
                     entry_note,
                     external_reference,
                     related_request_id,
+                    insurance_decision_id,
                     actor,
                 ),
             )
             entry_id = cursor.lastrowid
 
         return self.get_alpha_ledger_entry(entry_id), self.get_alpha_account(portfolio_id)
+
+    def _require_alpha_ledger_insurance_authority(
+        self,
+        portfolio_id: str,
+        direction: str,
+        insurance_decision_id: str,
+    ) -> None:
+        if not insurance_decision_id:
+            raise ValueError("Alpha 账本记账缺少 InsuranceDecision 授权")
+
+        latest = self.get_latest_insurance_decision(portfolio_id)
+        if not latest:
+            raise ValueError("Alpha 账本记账缺少持久化 InsuranceDecision")
+        if latest.get("id") != insurance_decision_id:
+            raise ValueError("Alpha 账本记账 InsuranceDecision 不是当前组合最新授权")
+
+        decision = build_authority_decision(
+            coerce_insurance_state(latest.get("new_state")),
+            reasons=latest.get("reasons", []),
+        )
+        allowed = decision.allow_deposit if direction == "IN" else decision.allow_withdrawal_execution
+        if not allowed:
+            raise ValueError(
+                "Insurance Layer blocked Alpha ledger "
+                f"{'deposit' if direction == 'IN' else 'withdrawal'}"
+            )
+
+    def _require_alpha_execution_authority(
+        self,
+        portfolio_id: str,
+        insurance_decision_id: str,
+    ) -> None:
+        if not insurance_decision_id:
+            raise ValueError("Alpha 执行缺少 InsuranceDecision 授权")
+
+        latest = self.get_latest_insurance_decision(portfolio_id)
+        if not latest:
+            raise ValueError("Alpha 执行缺少持久化 InsuranceDecision")
+        if latest.get("id") != insurance_decision_id:
+            raise ValueError("Alpha 执行 InsuranceDecision 不是当前组合最新授权")
+
+        decision = build_authority_decision(
+            coerce_insurance_state(latest.get("new_state")),
+            reasons=latest.get("reasons", []),
+        )
+        if not decision.allow_alpha_execution:
+            raise ValueError("Insurance Layer blocked Alpha execution")
 
     def get_alpha_ledger_entry(self, entry_id: int) -> Optional[dict]:
         with self._conn() as conn:
@@ -1348,13 +1560,29 @@ class Database:
                 rows = conn.execute("SELECT * FROM alpha_strategies ORDER BY created_at").fetchall()
             return [dict(r) for r in rows]
 
-    def upsert_strategy(self, strategy_id: str, portfolio_id: str = "us", **kwargs):
+    def upsert_strategy(
+        self,
+        strategy_id: str,
+        portfolio_id: str = "us",
+        insurance_decision_id: str | None = None,
+        **kwargs,
+    ):
         """创建或更新策略"""
         with self._conn() as conn:
             existing = conn.execute(
-                "SELECT 1 FROM alpha_strategies WHERE portfolio_id = ? AND id = ?",
+                "SELECT * FROM alpha_strategies WHERE portfolio_id = ? AND id = ?",
                 (portfolio_id, strategy_id),
             ).fetchone()
+            existing_data = dict(existing) if existing else None
+            target_status = kwargs.get("status") or (existing_data or {}).get("status")
+            requires_authority = target_status == "ENABLED" and any(
+                key in kwargs for key in ("allocation_pct", "capital", "status")
+            )
+            if requires_authority:
+                self._require_alpha_execution_authority(
+                    portfolio_id,
+                    insurance_decision_id or self._current_alpha_authority_id(),
+                )
             if existing:
                 sets = ", ".join(f"{k} = ?" for k in kwargs)
                 values = list(kwargs.values()) + [portfolio_id, strategy_id]
@@ -1371,8 +1599,19 @@ class Database:
                     values,
                 )
 
-    def update_strategy_status(self, strategy_id: str, status: str, portfolio_id: str = "us"):
+    def update_strategy_status(
+        self,
+        strategy_id: str,
+        status: str,
+        portfolio_id: str = "us",
+        insurance_decision_id: str | None = None,
+    ):
         """启用/禁用策略"""
+        if status == "ENABLED":
+            self._require_alpha_execution_authority(
+                portfolio_id,
+                insurance_decision_id or self._current_alpha_authority_id(),
+            )
         now = __import__("datetime").datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with self._conn() as conn:
             extra = ""
@@ -1385,11 +1624,31 @@ class Database:
                 (status, now, portfolio_id, strategy_id) if extra else (status, portfolio_id, strategy_id),
             )
 
-    def save_alpha_transaction(self, strategy_id: str, portfolio_id: str, date: str,
-                                action: str, premium: float = 0, pnl: float = 0, **kwargs):
+    def save_alpha_transaction(
+        self,
+        strategy_id: str,
+        portfolio_id: str,
+        date: str,
+        action: str,
+        premium: float = 0,
+        pnl: float = 0,
+        insurance_decision_id: str | None = None,
+        **kwargs,
+    ):
         """记录 Alpha 策略交易"""
-        fields = ["strategy_id", "portfolio_id", "date", "action", "premium", "pnl"]
-        values = [strategy_id, portfolio_id, date, action, premium, pnl]
+        authority_id = insurance_decision_id or self._current_alpha_authority_id()
+        self._require_alpha_execution_authority(portfolio_id, authority_id)
+
+        fields = [
+            "strategy_id",
+            "portfolio_id",
+            "date",
+            "action",
+            "premium",
+            "pnl",
+            "insurance_decision_id",
+        ]
+        values = [strategy_id, portfolio_id, date, action, premium, pnl, authority_id]
         for k, v in kwargs.items():
             fields.append(k)
             values.append(v)

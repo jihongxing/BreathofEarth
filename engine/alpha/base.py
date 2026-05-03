@@ -8,6 +8,11 @@ Alpha 策略基类
 import logging
 from abc import ABC, abstractmethod
 from db.database import Database
+from engine.insurance import (
+    build_authority_decision,
+    build_missing_authority_decision,
+    coerce_insurance_state,
+)
 
 logger = logging.getLogger("xirang.alpha")
 
@@ -63,10 +68,38 @@ class AlphaStrategy(ABC):
         capital = alpha_balance * allocation_pct
         return strategy, alpha_account, capital
 
-    @abstractmethod
     def run(self, portfolio_id: str, current_date: str, spy_price: float) -> dict:
         """
-        执行策略逻辑。
+        执行策略逻辑。所有 Alpha 写入口都必须先通过持久化 InsuranceDecision 授权。
+        """
+        latest = self.db.get_latest_insurance_decision(portfolio_id)
+        if latest:
+            decision = build_authority_decision(
+                coerce_insurance_state(latest.get("new_state")),
+                reasons=latest.get("reasons", []),
+            )
+            insurance_decision_id = latest.get("id")
+        else:
+            decision = build_missing_authority_decision("missing persisted InsuranceDecision")
+            insurance_decision_id = None
+
+        if not decision.allow_alpha_execution:
+            return {
+                "action": "BLOCKED",
+                "reason": "Insurance Layer blocked Alpha execution",
+                "insurance_state": decision.state.value,
+                "reasons": decision.reasons,
+            }
+
+        with self.db.alpha_authority(insurance_decision_id):
+            result = self._run(portfolio_id, current_date, spy_price)
+        result.setdefault("insurance_decision_id", insurance_decision_id)
+        return result
+
+    @abstractmethod
+    def _run(self, portfolio_id: str, current_date: str, spy_price: float) -> dict:
+        """
+        已授权后的策略内部逻辑。
 
         Args:
             portfolio_id: 组合 ID

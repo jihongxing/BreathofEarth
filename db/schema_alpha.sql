@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS alpha_ledger_entries (
     note TEXT,
     external_reference TEXT,
     related_request_id TEXT,
+    insurance_decision_id TEXT NOT NULL,
     actor TEXT NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -75,6 +76,7 @@ CREATE TABLE IF NOT EXISTS alpha_transactions (
     pnl REAL NOT NULL DEFAULT 0,
     spy_price REAL,
     detail TEXT,
+    insurance_decision_id TEXT NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 

@@ -19,7 +19,12 @@ import logging
 from datetime import datetime, timedelta
 from db.database import Database
 from engine.alpha.registry import REGISTRY, get_strategy_class
-from engine.insurance import InsuranceDecision
+from engine.insurance import (
+    InsuranceDecision,
+    build_authority_decision,
+    build_missing_authority_decision,
+    coerce_insurance_state,
+)
 
 logger = logging.getLogger("xirang.alpha.arena")
 
@@ -42,6 +47,19 @@ class StrategyArena:
         cls = REGISTRY.get(strategy_id)
         return bool(cls and cls.FORMAL_REPORTING_ELIGIBLE)
 
+    def _latest_insurance_decision(self, portfolio_id: str) -> InsuranceDecision:
+        return self._latest_insurance_authority(portfolio_id)[0]
+
+    def _latest_insurance_authority(self, portfolio_id: str) -> tuple[InsuranceDecision, str | None]:
+        latest = self.db.get_latest_insurance_decision(portfolio_id)
+        if latest:
+            decision = build_authority_decision(
+                coerce_insurance_state(latest.get("new_state")),
+                reasons=latest.get("reasons", []),
+            )
+            return decision, latest.get("id")
+        return build_missing_authority_decision("missing persisted InsuranceDecision"), None
+
     def enforce_alpha_authority(self, decision: InsuranceDecision) -> dict:
         if not decision.allow_alpha_execution:
             return {
@@ -61,7 +79,6 @@ class StrategyArena:
         portfolio_id: str,
         current_date: str,
         spy_price: float,
-        insurance_decision: InsuranceDecision | None = None,
     ) -> list[dict]:
         """
         运行所有 ENABLED 策略。
@@ -69,10 +86,9 @@ class StrategyArena:
         Returns:
             每个策略的执行结果列表
         """
-        if insurance_decision is not None:
-            authority = self.enforce_alpha_authority(insurance_decision)
-            if authority["action"] == "BLOCKED":
-                return [authority]
+        authority = self.enforce_alpha_authority(self._latest_insurance_decision(portfolio_id))
+        if authority["action"] == "BLOCKED":
+            return [{"strategy_id": "ALL", **authority}]
 
         results = []
         for strategy_id, cls in REGISTRY.items():
@@ -101,13 +117,44 @@ class StrategyArena:
 
         return results
 
-    def quarterly_evaluation(self, portfolio_id: str = "us") -> dict:
+    def quarterly_evaluation(
+        self,
+        portfolio_id: str = "us",
+        insurance_decision_id: str | None = None,
+    ) -> dict:
         """
         季度评估：计算绩效指标 → 排名 → 淘汰/重分配。
 
         Returns:
             评估报告 dict
         """
+        if insurance_decision_id is None:
+            decision, insurance_decision_id = self._latest_insurance_authority(portfolio_id)
+        else:
+            latest = self.db.get_insurance_decision(insurance_decision_id)
+            if not latest or latest.get("portfolio_id") != portfolio_id:
+                raise ValueError("Alpha 评估 InsuranceDecision 与组合不匹配")
+            current = self.db.get_latest_insurance_decision(portfolio_id)
+            if not current or current.get("id") != insurance_decision_id:
+                raise ValueError("Alpha 评估 InsuranceDecision 不是当前组合最新授权")
+            decision = build_authority_decision(
+                coerce_insurance_state(latest.get("new_state")),
+                reasons=latest.get("reasons", []),
+            )
+
+        authority = self.enforce_alpha_authority(decision)
+        if authority["action"] == "BLOCKED":
+            return {
+                "date": datetime.now().strftime("%Y-%m-%d"),
+                "portfolio_id": portfolio_id,
+                "evaluations": [],
+                "allocation": authority,
+                "excluded_sandbox_strategies": [],
+                "reporting_scope": "formal_only",
+                "insurance_decision_id": insurance_decision_id,
+                "summary": "Insurance Layer blocked Alpha evaluation",
+            }
+
         strategies = self.db.list_strategies(portfolio_id)
         evaluations = []
 
@@ -148,11 +195,20 @@ class StrategyArena:
 
             # 执行淘汰
             if verdict == "SUSPEND" and s["status"] == "ENABLED":
-                self.db.update_strategy_status(sid, "SUSPENDED", portfolio_id=portfolio_id)
+                self.db.update_strategy_status(
+                    sid,
+                    "SUSPENDED",
+                    portfolio_id=portfolio_id,
+                    insurance_decision_id=insurance_decision_id,
+                )
                 logger.warning(f"策略 {sid} 被暂停: {reason}")
 
         # 资金再分配（仅 ENABLED 策略）
-        allocation = self._reallocate(evaluations, portfolio_id)
+        allocation = self._reallocate(
+            evaluations,
+            portfolio_id,
+            insurance_decision_id=insurance_decision_id,
+        )
 
         report = {
             "date": datetime.now().strftime("%Y-%m-%d"),
@@ -161,6 +217,7 @@ class StrategyArena:
             "allocation": allocation,
             "excluded_sandbox_strategies": excluded,
             "reporting_scope": "formal_only",
+            "insurance_decision_id": insurance_decision_id,
             "summary": self._generate_summary(evaluations, excluded_count=len(excluded)),
         }
 
@@ -168,7 +225,8 @@ class StrategyArena:
         self.db.save_audit_log(
             "ARENA_EVAL", "system",
             f"季度评估完成: {len(evaluations)} 个策略, "
-            f"{sum(1 for e in evaluations if e['verdict'] == 'SUSPEND')} 个暂停",
+            f"{sum(1 for e in evaluations if e['verdict'] == 'SUSPEND')} 个暂停 "
+            f"| InsuranceDecision={insurance_decision_id}",
         )
 
         return report
@@ -306,7 +364,12 @@ class StrategyArena:
 
         return "PASS", f"表现良好（夏普 {sharpe:.2f}）"
 
-    def _reallocate(self, evaluations: list[dict], portfolio_id: str) -> dict:
+    def _reallocate(
+        self,
+        evaluations: list[dict],
+        portfolio_id: str,
+        insurance_decision_id: str | None = None,
+    ) -> dict:
         """按夏普比率加权重新分配资金"""
         active = [e for e in evaluations
                   if e.get("verdict") in ("PASS", "WARNING")
@@ -330,6 +393,7 @@ class StrategyArena:
                 e["strategy_id"],
                 portfolio_id=portfolio_id,
                 allocation_pct=allocation_pct,
+                insurance_decision_id=insurance_decision_id,
             )
 
         return allocation

@@ -23,14 +23,23 @@ import numpy as np
 from db.database import Database
 from engine.cashflow import build_stability_signal
 from engine.config import MAX_EXECUTION_SLIPPAGE_PCT, PORTFOLIOS
-from engine.data_validator import DataValidationError, validate_prices, validate_returns
+from engine.data_validator import (
+    DataValidationError,
+    build_data_integrity_signal,
+    validate_prices,
+    validate_returns,
+)
 from engine.execution.base import ExecutionResult, OrderSide, OrderStatus
 from engine.execution.factory import create_executor, get_broker_topology
 from engine.execution.sync import BrokerSyncService
 from engine.insurance import (
     InsuranceLayer,
+    InsuranceSignal,
     InsuranceState,
+    SignalSeverity,
+    coerce_insurance_state,
     portfolio_state_from_insurance_state,
+    serialize_insurance_signal,
 )
 from engine.market_data import MarketDataService
 from engine.notifier import notify
@@ -87,6 +96,41 @@ class DailyRunner:
         issue = {"code": code, "message": message}
         issue.update(extra)
         return issue
+
+    def _get_current_insurance_state(self, portfolio_id: str) -> InsuranceState:
+        latest = self.db.get_latest_insurance_decision(portfolio_id)
+        if latest:
+            return coerce_insurance_state(latest.get("new_state"))
+        return InsuranceState.SAFE
+
+    def _issue_to_hard_veto_signal(self, source: str, issue: dict) -> InsuranceSignal:
+        return InsuranceSignal(
+            source=source,
+            severity=SignalSeverity.CRITICAL,
+            score=1.0,
+            weight=1.0,
+            hard_veto=True,
+            reason=issue.get("message") or issue.get("code") or "hard veto",
+            evidence=dict(issue),
+        )
+
+    def _evaluate_insurance(self, portfolio_id: str, signals: list[InsuranceSignal]):
+        previous_state = self._get_current_insurance_state(portfolio_id)
+        insurance = InsuranceLayer(current_state=previous_state)
+        assessment, decision = insurance.evaluate(signals, portfolio_id=portfolio_id)
+        source_signals = [serialize_insurance_signal(signal) for signal in signals]
+        return previous_state, assessment, decision, source_signals
+
+    def _insurance_report(self, assessment, decision, decision_id: str | None = None) -> dict:
+        report = {
+            "state": decision.state.value,
+            "risk_score": round(float(assessment.risk_score), 6),
+            "hard_blocks": assessment.hard_blocks,
+            "reasons": decision.reasons,
+        }
+        if decision_id:
+            report["decision_id"] = decision_id
+        return report
 
     def _get_broker_sync_policy(self, portfolio_id: str) -> dict:
         policy = PORTFOLIOS[portfolio_id].get("broker_sync_policy", {})
@@ -485,12 +529,18 @@ class DailyRunner:
         run_status: str,
         manual_intervention_reasons: list[dict],
         broker_sync_gate: dict | None = None,
+        insurance_assessment=None,
+        insurance_decision=None,
+        insurance_decision_id: str | None = None,
     ) -> dict:
+        report_state = engine.state
+        if insurance_decision is not None:
+            report_state = portfolio_state_from_insurance_state(insurance_decision.state)
         report = {
             "date": today,
             "portfolio": portfolio_id,
             "name": name,
-            "state": engine.state,
+            "state": report_state,
             "nav": round(engine.nav, 2),
             "core_nav": round(engine.core_nav, 2),
             "stability_balance": round(float(engine.stability_balance), 2),
@@ -504,6 +554,62 @@ class DailyRunner:
         }
         if broker_sync_gate is not None:
             report["broker_sync_gate"] = broker_sync_gate
+        if insurance_assessment is not None and insurance_decision is not None:
+            report["insurance"] = self._insurance_report(
+                insurance_assessment,
+                insurance_decision,
+                insurance_decision_id,
+            )
+        return report
+
+    def _exit_with_insurance(
+        self,
+        *,
+        today: str,
+        portfolio_id: str,
+        name: str,
+        currency: str,
+        engine,
+        action: str,
+        run_status: str,
+        signals: list[InsuranceSignal],
+        manual_intervention_reasons: list[dict],
+        broker_sync_gate: dict | None = None,
+    ) -> dict:
+        previous_state, assessment, decision, source_signals = self._evaluate_insurance(portfolio_id, signals)
+        compatibility_state = portfolio_state_from_insurance_state(decision.state)
+        report = self._build_early_exit_report(
+            today=today,
+            portfolio_id=portfolio_id,
+            name=name,
+            currency=currency,
+            engine=engine,
+            action=action,
+            run_status=run_status,
+            manual_intervention_reasons=manual_intervention_reasons,
+            broker_sync_gate=broker_sync_gate,
+            insurance_assessment=assessment,
+            insurance_decision=decision,
+        )
+        with self.db.transaction() as conn:
+            self.db.update_portfolio(
+                portfolio_id=portfolio_id,
+                state=compatibility_state,
+                conn=conn,
+            )
+            with self.db.insurance_decision_writer("daily_runner"):
+                decision_id = self.db.save_insurance_decision(
+                    portfolio_id=portfolio_id,
+                    previous_state=previous_state.value,
+                    decision=decision,
+                    risk_score=assessment.risk_score,
+                    hard_blocks=assessment.hard_blocks,
+                    source_signals=source_signals,
+                    conn=conn,
+                )
+            report["insurance"]["decision_id"] = decision_id
+            self.db.record_run(today, run_status, json.dumps(report), portfolio_id, conn=conn)
+        notify(report)
         return report
 
     def run_portfolio(self, portfolio_id: str, force: bool = False) -> dict:
@@ -541,8 +647,22 @@ class DailyRunner:
             today = datetime.now().strftime("%Y-%m-%d")
             msg = f"数据拉取失败: {e}"
             logger.error(f"  {msg}")
-            self.db.record_run(today, "FAILED", msg, portfolio_id)
-            return {"date": today, "portfolio": portfolio_id, "status": "FAILED", "reason": msg}
+            signal = build_data_integrity_signal(
+                ok=False,
+                reason=msg,
+                evidence={"stage": "data_fetch", "error": str(e)},
+            )
+            return self._exit_with_insurance(
+                today=today,
+                portfolio_id=portfolio_id,
+                name=name,
+                currency=currency,
+                engine=engine,
+                action=f"系统拦截: {msg}",
+                run_status="FAILED",
+                signals=[signal],
+                manual_intervention_reasons=[],
+            )
 
         market_date = self._get_market_date(prices)
         today = market_date.strftime("%Y-%m-%d")
@@ -556,12 +676,26 @@ class DailyRunner:
         except DataValidationError as e:
             msg = f"数据校验失败: {e}"
             logger.error(f"  {msg}")
-            self.db.record_run(today, "FAILED", msg, portfolio_id)
-            return {"date": today, "portfolio": portfolio_id, "status": "FAILED", "reason": msg}
+            signal = build_data_integrity_signal(
+                ok=False,
+                reason=msg,
+                evidence={"stage": "price_validation", "error": str(e)},
+            )
+            return self._exit_with_insurance(
+                today=today,
+                portfolio_id=portfolio_id,
+                name=name,
+                currency=currency,
+                engine=engine,
+                action=f"系统拦截: {msg}",
+                run_status="FAILED",
+                signals=[signal],
+                manual_intervention_reasons=[],
+            )
 
         manual_intervention = self._check_data_freshness(portfolio_id, market_date)
         if manual_intervention:
-            report = self._build_early_exit_report(
+            return self._exit_with_insurance(
                 today=today,
                 portfolio_id=portfolio_id,
                 name=name,
@@ -569,15 +703,13 @@ class DailyRunner:
                 engine=engine,
                 action=f"人工介入: {manual_intervention['message']}",
                 run_status="MANUAL_INTERVENTION_REQUIRED",
+                signals=[self._issue_to_hard_veto_signal("data", manual_intervention)],
                 manual_intervention_reasons=[manual_intervention],
             )
-            self.db.record_run(today, "MANUAL_INTERVENTION_REQUIRED", json.dumps(report), portfolio_id)
-            notify(report)
-            return report
 
         broker_sync_gate = self._check_primary_broker_sync_gate(portfolio_id, market_date)
         if broker_sync_gate:
-            report = self._build_early_exit_report(
+            return self._exit_with_insurance(
                 today=today,
                 portfolio_id=portfolio_id,
                 name=name,
@@ -585,12 +717,10 @@ class DailyRunner:
                 engine=engine,
                 action=f"系统拦截: {broker_sync_gate['message']}",
                 run_status="FAILED_EXECUTION",
+                signals=[self._issue_to_hard_veto_signal("broker", broker_sync_gate)],
                 manual_intervention_reasons=[],
                 broker_sync_gate=broker_sync_gate,
             )
-            self.db.record_run(today, "FAILED_EXECUTION", json.dumps(report), portfolio_id)
-            notify(report)
-            return report
 
         daily_returns = market.get_today_returns(prices)
         try:
@@ -598,8 +728,22 @@ class DailyRunner:
         except DataValidationError as e:
             msg = f"收益率校验失败: {e}"
             logger.error(f"  {msg}")
-            self.db.record_run(today, "FAILED", msg, portfolio_id)
-            return {"date": today, "portfolio": portfolio_id, "status": "FAILED", "reason": msg}
+            signal = build_data_integrity_signal(
+                ok=False,
+                reason=msg,
+                evidence={"stage": "return_validation", "error": str(e)},
+            )
+            return self._exit_with_insurance(
+                today=today,
+                portfolio_id=portfolio_id,
+                name=name,
+                currency=currency,
+                engine=engine,
+                action=f"系统拦截: {msg}",
+                run_status="FAILED",
+                signals=[signal],
+                manual_intervention_reasons=[],
+            )
 
         indicators = market.get_risk_indicators(prices)
         logger.info(f"  今日收益: {dict(zip(assets, [f'{r:+.2%}' for r in daily_returns]))}")
@@ -624,8 +768,9 @@ class DailyRunner:
                 nav=sim_nav,
             ),
         ]
-        insurance = InsuranceLayer(current_state=InsuranceState.SAFE)
-        insurance_assessment, insurance_decision = insurance.evaluate(insurance_signals)
+        previous_insurance_state, insurance_assessment, insurance_decision, source_insurance_signals = (
+            self._evaluate_insurance(portfolio_id, insurance_signals)
+        )
         compatibility_portfolio_state = portfolio_state_from_insurance_state(
             insurance_decision.state
         )
@@ -798,27 +943,19 @@ class DailyRunner:
             engine.refresh_nav()
 
         tax_harvest_result = None
+        tax_harvest_report = None
+        run_tax_harvest_after_commit = False
         if self._should_run_tax_harvest(portfolio_id):
-            logger.info("  执行年末税务优化...")
-            harvester = TaxLossHarvester(self.db, min_loss_pct=0.05)
-            tax_harvest_result = harvester.run_year_end_harvest(
-                portfolio_id=portfolio_id,
-                current_prices=current_prices,
-                current_date=today,
-            )
-
-            if tax_harvest_result.total_loss_harvested > 0:
-                logger.info(
-                    f"  ✓ 税损收割: {len(tax_harvest_result.harvested_positions)} 个持仓, "
-                    f"收割 ${tax_harvest_result.total_loss_harvested:,.2f}, "
-                    f"预估节税 ${tax_harvest_result.estimated_tax_saved:,.2f}"
-                )
+            if not insurance_decision.allow_tax_harvest:
+                tax_harvest_report = {
+                    "status": "BLOCKED",
+                    "reason": "Insurance Layer blocked tax harvest",
+                    "insurance_state": insurance_decision.state.value,
+                    "reasons": insurance_decision.reasons,
+                }
+                logger.warning("  税务优化被 Insurance Layer 拦截")
             else:
-                logger.info(f"  ✓ 税务优化: {tax_harvest_result.message}")
-
-            reversed_count = harvester.check_and_reverse_harvests(today, portfolio_id)
-            if reversed_count > 0:
-                logger.info(f"  ✓ 换回税损收割: {reversed_count} 个")
+                run_tax_harvest_after_commit = True
         elif portfolio_id == "us":
             logger.info("  税务优化默认关闭，待真实账本闭环后再启用。")
 
@@ -850,12 +987,10 @@ class DailyRunner:
             "manual_intervention_reasons": manual_intervention_reasons,
             "broker_sync_policy": self._get_broker_sync_policy(portfolio_id),
             "live_execution_policy": self._get_live_execution_policy(portfolio_id),
-            "insurance": {
-                "state": insurance_decision.state.value,
-                "risk_score": round(float(insurance_assessment.risk_score), 6),
-                "hard_blocks": insurance_assessment.hard_blocks,
-                "reasons": insurance_decision.reasons,
-            },
+            "insurance": self._insurance_report(
+                insurance_assessment,
+                insurance_decision,
+            ),
         }
 
         if execution_result is not None:
@@ -899,12 +1034,8 @@ class DailyRunner:
         if shadow_run_report is not None:
             report["shadow_run"] = shadow_run_report
 
-        if tax_harvest_result:
-            report["tax_harvest"] = {
-                "harvested_count": len(tax_harvest_result.harvested_positions),
-                "total_loss": round(tax_harvest_result.total_loss_harvested, 2),
-                "estimated_tax_saved": round(tax_harvest_result.estimated_tax_saved, 2),
-            }
+        if tax_harvest_report:
+            report["tax_harvest"] = tax_harvest_report
 
         try:
             with self.db.transaction() as conn:
@@ -933,14 +1064,29 @@ class DailyRunner:
                     portfolio_id=portfolio_id,
                     conn=conn,
                 )
+                with self.db.insurance_decision_writer("daily_runner"):
+                    insurance_decision_id = self.db.save_insurance_decision(
+                        portfolio_id=portfolio_id,
+                        previous_state=previous_insurance_state.value,
+                        decision=insurance_decision,
+                        risk_score=insurance_assessment.risk_score,
+                        hard_blocks=insurance_assessment.hard_blocks,
+                        source_signals=source_insurance_signals,
+                        conn=conn,
+                    )
+                report["insurance"]["decision_id"] = insurance_decision_id
                 if order:
+                    transaction_reason = (
+                        f"{action or tx_type or 'Core rebalance'} "
+                        f"| InsuranceDecision={insurance_decision_id}"
+                    )
                     self.db.save_transaction(
                         date=today,
                         tx_type=tx_type,
                         target_weights=order.target_weights,
                         turnover=order.turnover,
                         friction_cost=friction_cost if execution_status == "FILLED" else 0.0,
-                        reason=action,
+                        reason=transaction_reason,
                         portfolio_id=portfolio_id,
                         conn=conn,
                     )
@@ -967,6 +1113,36 @@ class DailyRunner:
         except Exception as e:
             logger.error(f"  数据库事务失败: {e}")
             return {"date": today, "portfolio": portfolio_id, "status": "FAILED", "reason": f"数据库错误: {e}"}
+
+        if run_tax_harvest_after_commit:
+            logger.info("  执行年末税务优化...")
+            harvester = TaxLossHarvester(self.db, min_loss_pct=0.05)
+            tax_harvest_result = harvester.run_year_end_harvest(
+                portfolio_id=portfolio_id,
+                current_prices=current_prices,
+                current_date=today,
+            )
+
+            if tax_harvest_result.total_loss_harvested > 0:
+                logger.info(
+                    f"  ✓ 税损收割: {len(tax_harvest_result.harvested_positions)} 个持仓, "
+                    f"收割 ${tax_harvest_result.total_loss_harvested:,.2f}, "
+                    f"预估节税 ${tax_harvest_result.estimated_tax_saved:,.2f}"
+                )
+            else:
+                logger.info(f"  ✓ 税务优化: {tax_harvest_result.message}")
+
+            reversed_count = harvester.check_and_reverse_harvests(today, portfolio_id)
+            if reversed_count > 0:
+                logger.info(f"  ✓ 换回税损收割: {reversed_count} 个")
+
+            report["tax_harvest"] = {
+                "status": "SUCCESS" if tax_harvest_result.success else "ERROR",
+                "harvested_count": len(tax_harvest_result.harvested_positions),
+                "total_loss": round(tax_harvest_result.total_loss_harvested, 2),
+                "estimated_tax_saved": round(tax_harvest_result.estimated_tax_saved, 2),
+            }
+            self.db.record_run(today, run_status, json.dumps(report), portfolio_id)
 
         logger.info(f"  NAV: {currency}{report['nav']:,.2f} | {report['state']}")
         logger.info(f"  操作: {action or '无'}")

@@ -19,6 +19,12 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from db.database import Database
+from engine.insurance import (
+    InsuranceDecision,
+    build_authority_decision,
+    build_missing_authority_decision,
+    coerce_insurance_state,
+)
 
 logger = logging.getLogger("xirang.tax_optimizer")
 
@@ -66,6 +72,40 @@ class TaxLossHarvester:
         """
         self.db = db
         self.min_loss_pct = min_loss_pct
+
+    def _latest_insurance_authority(self, portfolio_id: str) -> tuple[InsuranceDecision, str | None]:
+        latest = self.db.get_latest_insurance_decision(portfolio_id)
+        if latest:
+            decision = build_authority_decision(
+                coerce_insurance_state(latest.get("new_state")),
+                reasons=latest.get("reasons", []),
+            )
+            return decision, latest.get("id")
+        return build_missing_authority_decision("missing persisted InsuranceDecision"), None
+
+    def _block_tax_harvest(self, portfolio_id: str, decision: InsuranceDecision, decision_id: str | None) -> str:
+        insurance_ref = decision_id or "missing"
+        message = (
+            "Insurance Layer blocked tax-loss harvest "
+            f"for {portfolio_id}: {decision.state.value}"
+        )
+        try:
+            self.db.save_audit_log(
+                "TAX_HARVEST_BLOCKED",
+                "tax_optimizer",
+                f"{message} | InsuranceDecision={insurance_ref}",
+            )
+        except Exception as exc:
+            logger.warning(f"税损收割阻断审计写入失败: {exc}")
+        logger.warning(f"{message} ({'; '.join(decision.reasons)})")
+        return "Insurance Layer blocked tax-loss harvest"
+
+    def enforce_tax_harvest_authority(self, portfolio_id: str) -> tuple[bool, InsuranceDecision, str | None, str]:
+        decision, decision_id = self._latest_insurance_authority(portfolio_id)
+        if not decision.allow_tax_harvest:
+            reason = self._block_tax_harvest(portfolio_id, decision, decision_id)
+            return False, decision, decision_id, reason
+        return True, decision, decision_id, "Insurance Layer allowed tax-loss harvest"
 
     def scan_harvestable_losses(
         self,
@@ -162,6 +202,10 @@ class TaxLossHarvester:
             是否成功
         """
         try:
+            allowed, _, _, _ = self.enforce_tax_harvest_authority(portfolio_id)
+            if not allowed:
+                return False
+
             # 计算 Wash Sale 安全日期（30 天后）
             current_dt = datetime.strptime(current_date, "%Y-%m-%d")
             washsale_safe_date = (current_dt + timedelta(days=31)).strftime("%Y-%m-%d")
@@ -245,6 +289,16 @@ class TaxLossHarvester:
         Returns:
             收割结果
         """
+        allowed, decision, decision_id, reason = self.enforce_tax_harvest_authority(portfolio_id)
+        if not allowed:
+            return HarvestResult(
+                success=False,
+                harvested_positions=[],
+                total_loss_harvested=0.0,
+                estimated_tax_saved=0.0,
+                message=f"{reason}: {decision.state.value} | InsuranceDecision={decision_id or 'missing'}",
+            )
+
         # 1. 扫描可收割的税损
         harvestable = self.scan_harvestable_losses(portfolio_id, current_prices)
 

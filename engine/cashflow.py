@@ -31,7 +31,14 @@ from engine.config import (
     LAYER_TARGET_CORE, LAYER_TARGET_STABILITY,
     LAYER_MIN_STABILITY, LAYER_MAX_STABILITY, LAYER_TARGET_ALPHA,
 )
-from engine.insurance import InsuranceDecision, InsuranceSignal, SignalSeverity
+from engine.insurance import (
+    InsuranceDecision,
+    InsuranceSignal,
+    SignalSeverity,
+    build_authority_decision,
+    build_missing_authority_decision,
+    coerce_insurance_state,
+)
 
 logger = logging.getLogger("xirang.cashflow")
 
@@ -87,6 +94,29 @@ class CashflowEngine:
     def _get_total_nav(self, core_sum: float, stability: float) -> float:
         return core_sum + stability
 
+    def _latest_insurance_authority(self, portfolio_id: str) -> tuple[InsuranceDecision, str | None]:
+        latest = self.db.get_latest_insurance_decision(portfolio_id)
+        if latest:
+            decision = build_authority_decision(
+                coerce_insurance_state(latest.get("new_state")),
+                reasons=latest.get("reasons", []),
+            )
+            return decision, latest.get("id")
+        return build_missing_authority_decision("missing persisted InsuranceDecision"), None
+
+    def _latest_insurance_decision(self, portfolio_id: str) -> InsuranceDecision:
+        return self._latest_insurance_authority(portfolio_id)[0]
+
+    def enforce_deposit_authority(self, decision: InsuranceDecision) -> CashflowResult:
+        if not decision.allow_deposit:
+            return CashflowResult(
+                "ERROR",
+                "Insurance Layer blocked deposit",
+                insurance_state=decision.state.value,
+                reasons=decision.reasons,
+            )
+        return CashflowResult("SUCCESS", "Insurance Layer allowed deposit")
+
     def enforce_withdrawal_authority(self, decision: InsuranceDecision) -> CashflowResult:
         if not decision.allow_withdrawal_execution:
             return CashflowResult(
@@ -98,9 +128,16 @@ class CashflowEngine:
         return CashflowResult("SUCCESS", "Insurance Layer allowed withdrawal execution")
 
     def deposit_preview(
-        self, amount: float, portfolio_id: str = "us"
+        self,
+        amount: float,
+        portfolio_id: str = "us",
     ) -> CashflowResult:
         """模拟入金分配方案，不写入数据库，供用户确认"""
+        decision, _ = self._latest_insurance_authority(portfolio_id)
+        authority = self.enforce_deposit_authority(decision)
+        if authority.status == "ERROR":
+            return authority
+
         if amount < MIN_DEPOSIT:
             return CashflowResult("ERROR", f"最小入金额 ${MIN_DEPOSIT:,.0f}")
 
@@ -210,8 +247,16 @@ class CashflowEngine:
         )
 
     def deposit(
-        self, amount: float, depositor: str, portfolio_id: str = "us"
+        self,
+        amount: float,
+        depositor: str,
+        portfolio_id: str = "us",
     ) -> CashflowResult:
+        decision, insurance_decision_id = self._latest_insurance_authority(portfolio_id)
+        authority = self.enforce_deposit_authority(decision)
+        if authority.status == "ERROR":
+            return authority
+
         if amount < MIN_DEPOSIT:
             return CashflowResult("ERROR", f"最小入金额 ${MIN_DEPOSIT:,.0f}")
 
@@ -318,7 +363,7 @@ class CashflowEngine:
             self.db.save_transaction(
                 date=datetime.now().strftime("%Y-%m-%d"),
                 tx_type="DEPOSIT",
-                reason=f"入金 {allocation_desc}",
+                reason=f"入金 {allocation_desc} | InsuranceDecision={insurance_decision_id}",
                 portfolio_id=portfolio_id,
                 conn=conn,
             )
@@ -332,7 +377,7 @@ class CashflowEngine:
             )
             self.db.save_audit_log(
                 "DEPOSIT", depositor,
-                f"入金 {allocation_desc} → 组合 {portfolio_id}",
+                f"入金 {allocation_desc} → 组合 {portfolio_id} | InsuranceDecision={insurance_decision_id}",
                 conn=conn,
             )
 
@@ -450,16 +495,15 @@ class CashflowEngine:
         self,
         withdrawal_id: str,
         executor: str,
-        insurance_decision: InsuranceDecision | None = None,
     ) -> CashflowResult:
-        if insurance_decision is not None:
-            authority = self.enforce_withdrawal_authority(insurance_decision)
-            if authority.status == "ERROR":
-                return authority
-
         withdrawal = self.db.get_withdrawal_request(withdrawal_id)
         if not withdrawal:
             return CashflowResult("ERROR", "出金请求不存在")
+
+        decision, insurance_decision_id = self._latest_insurance_authority(withdrawal["portfolio_id"])
+        authority = self.enforce_withdrawal_authority(decision)
+        if authority.status == "ERROR":
+            return authority
 
         if withdrawal["status"] != "APPROVED":
             return CashflowResult("ERROR", f"出金请求状态为 {withdrawal['status']}，需要 APPROVED")
@@ -568,7 +612,7 @@ class CashflowEngine:
                 tx_type="WITHDRAWAL",
                 turnover=amount,
                 friction_cost=round(friction_cost, 2),
-                reason=f"出金执行 #{withdrawal_id}，${amount:,.2f}",
+                reason=f"出金执行 #{withdrawal_id}，${amount:,.2f} | InsuranceDecision={insurance_decision_id}",
                 portfolio_id=portfolio_id,
                 conn=conn,
             )
@@ -583,7 +627,7 @@ class CashflowEngine:
                 )
             self.db.save_audit_log(
                 "WITHDRAWAL_EXECUTED", executor,
-                f"出金执行 #{withdrawal_id}，${amount:,.2f}，摩擦 ${friction_cost:.2f}",
+                f"出金执行 #{withdrawal_id}，${amount:,.2f}，摩擦 ${friction_cost:.2f} | InsuranceDecision={insurance_decision_id}",
                 conn=conn,
             )
 

@@ -9,6 +9,7 @@ import pytest
 
 from db.database import Database
 from engine.governance import WithdrawalGovernance, SMALL_WITHDRAWAL_APPROVALS
+from engine.insurance import InsuranceState, build_authority_decision
 
 
 @pytest.fixture
@@ -21,7 +22,22 @@ def temp_db():
     db_path.unlink()
 
 
+def _save_insurance_decision(db, **kwargs):
+    with db.insurance_decision_writer("test"):
+        return db.save_insurance_decision(**kwargs)
+
+
 def test_small_withdrawal_stays_pending_until_manual_approval(temp_db):
+    safe = build_authority_decision(InsuranceState.SAFE, reasons=["test safe"])
+    _save_insurance_decision(
+        temp_db,
+        portfolio_id="us",
+        previous_state="SAFE",
+        decision=safe,
+        risk_score=0.0,
+        hard_blocks=[],
+        source_signals=[],
+    )
     gov = WithdrawalGovernance(temp_db)
 
     result = gov.request_withdrawal(

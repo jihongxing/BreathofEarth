@@ -116,15 +116,15 @@ def build_authority_decision(
             state=state,
             allow_observation=True,
             allow_suggestions=True,
-            allow_core_rebalance=True,
+            allow_core_rebalance=False,
             allow_risk_reducing_rebalance=True,
             allow_live_execution=True,
-            allow_alpha_execution=True,
+            allow_alpha_execution=False,
             allow_withdrawal_request=True,
             allow_withdrawal_approval=True,
             allow_withdrawal_execution=True,
             allow_deposit=True,
-            allow_tax_harvest=True,
+            allow_tax_harvest=False,
             force_de_risk=False,
             force_cash_floor=True,
             block_trading=False,
@@ -219,6 +219,33 @@ class InsuranceSignal:
     hard_veto: bool
     reason: str
     evidence: dict
+
+
+def coerce_insurance_state(value: str | InsuranceState | None) -> InsuranceState:
+    if isinstance(value, InsuranceState):
+        return value
+    if value:
+        try:
+            return InsuranceState(str(value))
+        except ValueError:
+            return InsuranceState.LOCKED
+    return InsuranceState.LOCKED
+
+
+def build_missing_authority_decision(reason: str = "missing persisted InsuranceDecision") -> InsuranceDecision:
+    return build_authority_decision(InsuranceState.LOCKED, reasons=[reason])
+
+
+def serialize_insurance_signal(signal: InsuranceSignal) -> dict:
+    return {
+        "source": signal.source,
+        "severity": signal.severity.value,
+        "score": float(signal.score),
+        "weight": float(signal.weight),
+        "hard_veto": bool(signal.hard_veto),
+        "reason": signal.reason,
+        "evidence": signal.evidence,
+    }
 
 
 @dataclass(frozen=True)
@@ -323,12 +350,42 @@ class InsuranceLayer:
     def __init__(self, current_state: InsuranceState = InsuranceState.SAFE):
         self.current_state = current_state
 
+    def _validate_recovery_binding(
+        self,
+        proposal: RecoveryProposal,
+        proposed_state: InsuranceState,
+        portfolio_id: str | None,
+        now: datetime,
+    ) -> TransitionDecision:
+        if portfolio_id is None:
+            return TransitionDecision(False, "recovery proposal portfolio scope required")
+        if proposal.portfolio_id != portfolio_id:
+            return TransitionDecision(False, "recovery proposal portfolio mismatch")
+        if proposal.from_state != self.current_state:
+            return TransitionDecision(False, "recovery proposal from_state mismatch")
+        if proposal.proposed_to_state != proposed_state:
+            return TransitionDecision(False, "recovery proposal proposed_to_state mismatch")
+        return validate_recovery_proposal(proposal, now=now)
+
     def evaluate(
         self,
         signals: list[InsuranceSignal],
-        approved_recovery: bool = False,
+        recovery_proposal: RecoveryProposal | None = None,
+        portfolio_id: str | None = None,
+        now: datetime | None = None,
     ) -> tuple[InsuranceAssessment, InsuranceDecision]:
         assessment = assess_insurance_state(self.current_state, signals)
+        recovery_decision = None
+        approved_recovery = False
+        if recovery_proposal is not None:
+            recovery_decision = self._validate_recovery_binding(
+                recovery_proposal,
+                proposed_state=assessment.state,
+                portfolio_id=portfolio_id,
+                now=now or datetime.now(),
+            )
+            approved_recovery = recovery_decision.allowed
+
         transition = validate_state_transition(
             current=self.current_state,
             proposed=assessment.state,
@@ -342,6 +399,8 @@ class InsuranceLayer:
             decision_state = self.current_state
 
         reasons = list(assessment.reasons)
+        if recovery_decision is not None and not recovery_decision.allowed:
+            reasons.append(recovery_decision.reason)
         if not transition.allowed:
             reasons.append(transition.reason)
 

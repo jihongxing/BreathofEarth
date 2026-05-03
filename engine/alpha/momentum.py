@@ -58,7 +58,7 @@ class MomentumRotationStrategy(AlphaStrategy):
     # 模拟 TLT 价格与 SPY 的关系
     TLT_SPY_RATIO = 0.20       # 假设 TLT ≈ SPY * 0.20（用于模拟）
 
-    def run(self, portfolio_id: str, current_date: str, spy_price: float) -> dict:
+    def _run(self, portfolio_id: str, current_date: str, spy_price: float) -> dict:
         """
         每月评估动量并执行轮动。
 

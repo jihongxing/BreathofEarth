@@ -92,6 +92,18 @@ def test_protected_freezes_alpha_and_blocks_normal_rebalance():
     assert decision.force_cash_floor is True
 
 
+def test_degraded_reduces_execution_capability():
+    decision = build_authority_decision(
+        state=InsuranceState.DEGRADED,
+        reasons=["warning-grade deterioration"],
+    )
+
+    assert decision.allow_core_rebalance is False
+    assert decision.allow_alpha_execution is False
+    assert decision.allow_tax_harvest is False
+    assert decision.force_cash_floor is True
+
+
 def test_safe_allows_normal_operations_when_no_blocks_exist():
     decision = build_authority_decision(
         state=InsuranceState.SAFE,
@@ -218,6 +230,112 @@ def test_locked_recovery_to_emergency_with_evidence_is_allowed():
 
     assert result.allowed is True
     assert result.reason == "recovery proposal valid"
+
+
+def test_invalid_insurance_state_coerces_to_locked():
+    from engine.insurance import coerce_insurance_state
+
+    assert coerce_insurance_state("CORRUPT") == InsuranceState.LOCKED
+    assert coerce_insurance_state(None) == InsuranceState.LOCKED
+
+
+def test_insurance_layer_locked_recovery_requires_valid_proposal():
+    layer = InsuranceLayer(current_state=InsuranceState.LOCKED)
+    signals = [
+        InsuranceSignal(
+            source="market",
+            severity=SignalSeverity.ERROR,
+            score=1.0,
+            weight=0.8,
+            hard_veto=False,
+            reason="recovery still constrained",
+            evidence={},
+        )
+    ]
+
+    assessment, decision = layer.evaluate(signals)
+
+    assert assessment.state == InsuranceState.EMERGENCY
+    assert decision.state == InsuranceState.LOCKED
+    assert "LOCKED exit requires approved recovery" in decision.reasons
+
+
+def test_insurance_layer_locked_recovery_uses_proposal_evidence():
+    proposal, now = _approved_recovery_proposal()
+    layer = InsuranceLayer(current_state=InsuranceState.LOCKED)
+    signals = [
+        InsuranceSignal(
+            source="market",
+            severity=SignalSeverity.ERROR,
+            score=1.0,
+            weight=0.8,
+            hard_veto=False,
+            reason="recovery constrained",
+            evidence={},
+        )
+    ]
+
+    assessment, decision = layer.evaluate(
+        signals,
+        recovery_proposal=proposal,
+        portfolio_id="us",
+        now=now,
+    )
+
+    assert assessment.state == InsuranceState.EMERGENCY
+    assert decision.state == InsuranceState.EMERGENCY
+
+
+def test_insurance_layer_rejects_recovery_proposal_for_wrong_portfolio():
+    proposal, now = _approved_recovery_proposal(portfolio_id="cn")
+    layer = InsuranceLayer(current_state=InsuranceState.LOCKED)
+    signals = [
+        InsuranceSignal(
+            source="market",
+            severity=SignalSeverity.ERROR,
+            score=1.0,
+            weight=0.8,
+            hard_veto=False,
+            reason="recovery constrained",
+            evidence={},
+        )
+    ]
+
+    _, decision = layer.evaluate(
+        signals,
+        recovery_proposal=proposal,
+        portfolio_id="us",
+        now=now,
+    )
+
+    assert decision.state == InsuranceState.LOCKED
+    assert "recovery proposal portfolio mismatch" in decision.reasons
+
+
+def test_insurance_layer_rejects_recovery_proposal_for_wrong_target_state():
+    proposal, now = _approved_recovery_proposal(proposed_to_state=InsuranceState.PROTECTED)
+    layer = InsuranceLayer(current_state=InsuranceState.LOCKED)
+    signals = [
+        InsuranceSignal(
+            source="market",
+            severity=SignalSeverity.ERROR,
+            score=1.0,
+            weight=0.8,
+            hard_veto=False,
+            reason="recovery constrained",
+            evidence={},
+        )
+    ]
+
+    _, decision = layer.evaluate(
+        signals,
+        recovery_proposal=proposal,
+        portfolio_id="us",
+        now=now,
+    )
+
+    assert decision.state == InsuranceState.LOCKED
+    assert "recovery proposal proposed_to_state mismatch" in decision.reasons
 
 
 def test_insurance_layer_returns_assessment_and_authority_decision():

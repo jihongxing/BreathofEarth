@@ -17,6 +17,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from db.database import Database
+from engine.insurance import build_authority_decision, build_missing_authority_decision, coerce_insurance_state
 from engine.notifier import notify_withdrawal, notify_approval
 
 logger = logging.getLogger("xirang.governance")
@@ -50,6 +51,19 @@ class WithdrawalGovernance:
     def __init__(self, db: Database):
         self.db = db
 
+    def _latest_insurance_authority(self, portfolio_id: str):
+        latest = self.db.get_latest_insurance_decision(portfolio_id)
+        if latest:
+            decision = build_authority_decision(
+                coerce_insurance_state(latest.get("new_state")),
+                reasons=latest.get("reasons", []),
+            )
+            return decision, latest.get("id")
+        return build_missing_authority_decision("missing persisted InsuranceDecision"), None
+
+    def _latest_insurance_decision(self, portfolio_id: str):
+        return self._latest_insurance_authority(portfolio_id)[0]
+
     def request_withdrawal(
         self, amount: float, reason: str, requester: str, portfolio_id: str = "us"
     ) -> GovernanceResult:
@@ -60,6 +74,15 @@ class WithdrawalGovernance:
         < 50万：单人审批，无冷却期
         >= 50万：多人审批 + 7天冷却期
         """
+        authority, insurance_decision_id = self._latest_insurance_authority(portfolio_id)
+        if not authority.allow_withdrawal_request:
+            return GovernanceResult(
+                "ERROR",
+                message="Insurance Layer blocked withdrawal request",
+                insurance_state=authority.state.value,
+                reasons=authority.reasons,
+            )
+
         withdrawal_id = str(uuid.uuid4())[:8]
         needs_multisig = amount >= MULTISIG_THRESHOLD
         cooling = COOLING_DAYS if needs_multisig else 0
@@ -79,7 +102,10 @@ class WithdrawalGovernance:
 
         self.db.save_audit_log(
             "WITHDRAW_REQUEST", requester,
-            f"发起出金 ${amount:,.2f}，组合: {portfolio_id}，原因: {reason}",
+            (
+                f"发起出金 ${amount:,.2f}，组合: {portfolio_id}，原因: {reason} "
+                f"| InsuranceDecision={insurance_decision_id}"
+            ),
         )
 
         if needs_multisig:
@@ -118,6 +144,16 @@ class WithdrawalGovernance:
         if not withdrawal:
             return GovernanceResult("ERROR", withdrawal_id, "出金请求不存在")
 
+        authority, insurance_decision_id = self._latest_insurance_authority(withdrawal["portfolio_id"])
+        if not authority.allow_withdrawal_approval:
+            return GovernanceResult(
+                "ERROR",
+                withdrawal_id,
+                "Insurance Layer blocked withdrawal approval",
+                insurance_state=authority.state.value,
+                reasons=authority.reasons,
+            )
+
         if withdrawal["status"] != "PENDING":
             return GovernanceResult("ERROR", withdrawal_id, f"请求已处于 {withdrawal['status']} 状态")
 
@@ -150,7 +186,10 @@ class WithdrawalGovernance:
         self.db.add_withdrawal_approval(withdrawal_id, approver, decision, comment)
         self.db.save_audit_log(
             f"WITHDRAW_{decision}", approver,
-            f"审批出金 #{withdrawal_id}: {decision}，备注: {comment}",
+            (
+                f"审批出金 #{withdrawal_id}: {decision}，备注: {comment} "
+                f"| InsuranceDecision={insurance_decision_id}"
+            ),
         )
 
         if decision == "REJECTED":

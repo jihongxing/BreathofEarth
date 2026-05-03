@@ -8,6 +8,7 @@ from pathlib import Path
 from datetime import datetime, timedelta
 
 from db.database import Database
+from engine.insurance import InsuranceState, build_authority_decision
 from engine.tax_optimizer import TaxLossHarvester, HarvestablePosition
 
 
@@ -18,6 +19,16 @@ def temp_db():
         db_path = Path(f.name)
     
     db = Database(db_path)
+    safe = build_authority_decision(InsuranceState.SAFE, reasons=["test safe"])
+    with db.insurance_decision_writer("test"):
+        db.save_insurance_decision(
+            portfolio_id="us",
+            previous_state="SAFE",
+            decision=safe,
+            risk_score=0.0,
+            hard_blocks=[],
+            source_signals=[],
+        )
     yield db
     
     # 清理

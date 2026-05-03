@@ -13,6 +13,7 @@ from api.routes.alpha_routes import (
     AlphaLedgerWithdrawalRequest,
     AlphaLedgerWithdrawalStatusRequest,
     create_alpha_ledger_entry,
+    run_strategy,
     update_alpha_withdrawal_request_status,
     withdraw_alpha_ledger,
 )
@@ -22,6 +23,7 @@ from engine.alpha.covered_call import CoveredCallStrategy
 from engine.alpha.momentum import MomentumRotationStrategy
 from engine.alpha.registry import list_available_strategies
 from engine.cashflow import CashflowEngine
+from engine.insurance import build_authority_decision, InsuranceState
 
 
 @pytest.fixture
@@ -34,13 +36,46 @@ def temp_db():
     db_path.unlink()
 
 
+def _save_safe_insurance_decision(db: Database, portfolio_id: str = "us"):
+    safe = build_authority_decision(InsuranceState.SAFE, reasons=["test safe"])
+    with db.insurance_decision_writer("test"):
+        return db.save_insurance_decision(
+            portfolio_id=portfolio_id,
+            previous_state="SAFE",
+            decision=safe,
+            risk_score=0.0,
+            hard_blocks=[],
+            source_signals=[],
+        )
+
+
+def _seed_alpha_cash(db: Database, amount: float, portfolio_id: str = "us"):
+    decision_id = _save_safe_insurance_decision(db, portfolio_id)
+    db.record_alpha_ledger_entry(
+        portfolio_id=portfolio_id,
+        direction="IN",
+        amount=amount,
+        actor="test",
+        insurance_decision_id=decision_id,
+        note="seed alpha",
+    )
+    return decision_id
+
+
 def test_same_strategy_is_scoped_by_portfolio(temp_db):
     strategy = CoveredCallStrategy(temp_db)
 
     strategy.ensure_registered("us")
     strategy.ensure_registered("cn")
 
-    temp_db.update_strategy_status("covered_call", "ENABLED", portfolio_id="us")
+    us_decision_id = _save_safe_insurance_decision(temp_db, "us")
+    cn_decision_id = _save_safe_insurance_decision(temp_db, "cn")
+    temp_db.update_strategy_status(
+        "covered_call",
+        "ENABLED",
+        portfolio_id="us",
+        insurance_decision_id=us_decision_id,
+    )
     temp_db.update_strategy_status("covered_call", "DISABLED", portfolio_id="cn")
 
     us_strategy = temp_db.get_strategy("covered_call", portfolio_id="us")
@@ -58,6 +93,7 @@ def test_same_strategy_is_scoped_by_portfolio(temp_db):
         action="SELL_CALL",
         premium=100,
         pnl=0,
+        insurance_decision_id=us_decision_id,
     )
     temp_db.save_alpha_transaction(
         strategy_id="covered_call",
@@ -66,6 +102,7 @@ def test_same_strategy_is_scoped_by_portfolio(temp_db):
         action="SELL_CALL",
         premium=50,
         pnl=0,
+        insurance_decision_id=cn_decision_id,
     )
 
     us_txs = temp_db.get_alpha_transactions("covered_call", portfolio_id="us", limit=10)
@@ -105,8 +142,13 @@ def test_same_strategy_is_scoped_by_portfolio(temp_db):
 def test_alpha_strategy_uses_independent_ledger_not_main_nav(temp_db):
     strategy = CoveredCallStrategy(temp_db)
     strategy.ensure_registered("us")
-    temp_db.update_strategy_status("covered_call", "ENABLED", portfolio_id="us")
-    temp_db.adjust_alpha_account_balance("us", 100_000, note="seed alpha")
+    decision_id = _seed_alpha_cash(temp_db, 100_000)
+    temp_db.update_strategy_status(
+        "covered_call",
+        "ENABLED",
+        portfolio_id="us",
+        insurance_decision_id=decision_id,
+    )
 
     result = strategy.run(
         portfolio_id="us",
@@ -119,9 +161,44 @@ def test_alpha_strategy_uses_independent_ledger_not_main_nav(temp_db):
     assert result["alpha_balance"] == pytest.approx(100_000.0)
 
 
+def test_alpha_manual_run_route_requires_insurance_authority(temp_db):
+    strategy = CoveredCallStrategy(temp_db)
+    strategy.ensure_registered("us")
+    decision_id = _seed_alpha_cash(temp_db, 100_000)
+    temp_db.update_strategy_status(
+        "covered_call",
+        "ENABLED",
+        portfolio_id="us",
+        insurance_decision_id=decision_id,
+    )
+    protected = build_authority_decision(InsuranceState.PROTECTED, reasons=["protected"])
+    with temp_db.insurance_decision_writer("test"):
+        temp_db.save_insurance_decision(
+            portfolio_id="us",
+            previous_state="SAFE",
+            decision=protected,
+            risk_score=0.6,
+            hard_blocks=[],
+            source_signals=[{"source": "market"}],
+        )
+
+    with pytest.raises(Exception) as exc_info:
+        asyncio.run(
+            run_strategy(
+                strategy_id="covered_call",
+                spy_price=450.0,
+                portfolio_id="us",
+                db=temp_db,
+                user={"username": "alice", "role": "admin"},
+            )
+        )
+
+    assert "Insurance Layer blocked Alpha execution" in str(exc_info.value)
+
+
 def test_layer_status_reports_alpha_as_independent_layer(temp_db):
     temp_db.ensure_portfolio("us", ["SPY", "TLT", "GLD", "SHV"])
-    temp_db.adjust_alpha_account_balance("us", 25_000, note="seed alpha")
+    _seed_alpha_cash(temp_db, 25_000)
 
     engine = CashflowEngine(temp_db)
     result = engine.get_layer_status("us").to_dict()
@@ -135,7 +212,7 @@ def test_layer_status_reports_alpha_as_independent_layer(temp_db):
 def test_sandbox_strategies_are_excluded_from_formal_leaderboard(temp_db):
     strategy = CoveredCallStrategy(temp_db)
     strategy.ensure_registered("us")
-    temp_db.adjust_alpha_account_balance("us", 40_000, note="seed alpha")
+    _seed_alpha_cash(temp_db, 40_000)
 
     board = StrategyArena(temp_db).get_leaderboard("us")
     assert board == []
@@ -176,11 +253,12 @@ def test_quarterly_evaluation_skips_sandbox_only_strategies(temp_db):
 
     assert report["evaluations"] == []
     assert report["reporting_scope"] == "formal_only"
-    assert "沙盒" in report["summary"]
+    assert report["summary"] == "Insurance Layer blocked Alpha evaluation"
+    assert report["insurance_decision_id"] is None
 
 
 def test_alpha_withdraw_creates_manual_request_without_changing_balance(temp_db):
-    temp_db.adjust_alpha_account_balance("us", 20_000, note="seed alpha")
+    _seed_alpha_cash(temp_db, 20_000)
 
     result = asyncio.run(
         withdraw_alpha_ledger(
@@ -206,7 +284,7 @@ def test_alpha_withdraw_creates_manual_request_without_changing_balance(temp_db)
 
 
 def test_alpha_withdraw_status_update_only_records_manual_handling(temp_db):
-    temp_db.adjust_alpha_account_balance("us", 12_000, note="seed alpha")
+    _seed_alpha_cash(temp_db, 12_000)
     temp_db.create_alpha_withdrawal_request(
         request_id="alpha123",
         amount=3_000,
@@ -239,6 +317,8 @@ def test_alpha_withdraw_status_update_only_records_manual_handling(temp_db):
 
 
 def test_alpha_manual_inflow_entry_updates_balance_and_history(temp_db):
+    decision_id = _save_safe_insurance_decision(temp_db)
+
     result = asyncio.run(
         create_alpha_ledger_entry(
             req=AlphaLedgerEntryRequest(
@@ -257,15 +337,20 @@ def test_alpha_manual_inflow_entry_updates_balance_and_history(temp_db):
     assert result["cash_balance"] == pytest.approx(8_000.0)
     assert result["entry"]["direction"] == "IN"
     assert result["entry"]["external_reference"] == "wire-in-001"
+    assert result["entry"]["insurance_decision_id"] == decision_id
 
     entries = temp_db.list_alpha_ledger_entries("us", limit=10)
     assert len(entries) == 1
     assert entries[0]["direction"] == "IN"
     assert entries[0]["balance_after"] == pytest.approx(8_000.0)
+    assert entries[0]["insurance_decision_id"] == decision_id
+    audit = temp_db.get_audit_log(limit=1)[0]
+    assert f"InsuranceDecision={decision_id}" in audit["detail"]
 
 
 def test_alpha_manual_outflow_entry_updates_balance_and_can_link_request(temp_db):
-    temp_db.adjust_alpha_account_balance("us", 15_000, note="seed alpha")
+    _seed_alpha_cash(temp_db, 15_000)
+    decision_id = _save_safe_insurance_decision(temp_db)
     temp_db.create_alpha_withdrawal_request(
         request_id="alpha-link-1",
         amount=4_000,
@@ -292,6 +377,7 @@ def test_alpha_manual_outflow_entry_updates_balance_and_can_link_request(temp_db
     assert result["cash_balance"] == pytest.approx(11_000.0)
     assert result["entry"]["direction"] == "OUT"
     assert result["entry"]["related_request_id"] == "alpha-link-1"
+    assert result["entry"]["insurance_decision_id"] == decision_id
 
     account = temp_db.get_alpha_account("us")
     assert account["total_outflows"] == pytest.approx(4_000.0)

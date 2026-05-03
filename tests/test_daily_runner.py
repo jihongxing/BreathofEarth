@@ -85,6 +85,11 @@ def _seed_broker_sync(
     )
 
 
+def _save_insurance_decision(db, **kwargs):
+    with db.insurance_decision_writer("test"):
+        return db.save_insurance_decision(**kwargs)
+
+
 class PendingExecutor:
     def translate_orders(self, current_positions, target_weights, total_nav, current_prices):
         return [
@@ -390,7 +395,13 @@ def test_stale_data_enters_manual_intervention_whitelist(temp_db, monkeypatch):
     assert result["run_status"] == "MANUAL_INTERVENTION_REQUIRED"
     assert result["manual_intervention_required"] is True
     assert result["manual_intervention_reasons"][0]["code"] == "STALE_DATA"
+    assert result["insurance"]["state"] == "LOCKED"
     assert called["executor"] == 0
+
+    latest = temp_db.get_latest_insurance_decision("us")
+    assert latest["new_state"] == "LOCKED"
+    assert latest["source_signals"][0]["source"] == "data"
+    assert latest["source_signals"][0]["hard_veto"] is True
 
 
 def test_missing_broker_receipt_enters_manual_intervention_whitelist(temp_db, monkeypatch):
@@ -457,7 +468,7 @@ def test_insurance_locked_blocks_core_rebalance(temp_db, monkeypatch):
         def __init__(self, current_state=None):
             pass
 
-        def evaluate(self, signals, approved_recovery=False):
+        def evaluate(self, signals, **kwargs):
             from engine.insurance import InsuranceAssessment, InsuranceDecision, InsuranceState
             assessment = InsuranceAssessment(
                 state=InsuranceState.LOCKED,
@@ -509,7 +520,7 @@ def test_locked_insurance_state_persists_legacy_portfolio_protection(temp_db, mo
         def __init__(self, current_state=None):
             pass
 
-        def evaluate(self, signals, approved_recovery=False):
+        def evaluate(self, signals, **kwargs):
             from engine.insurance import InsuranceAssessment, InsuranceDecision, InsuranceState
 
             assessment = InsuranceAssessment(
@@ -581,8 +592,8 @@ def test_year_end_rebalance_only_triggers_once_per_year(temp_db, monkeypatch):
     with temp_db._conn() as conn:
         count = conn.execute(
             """SELECT COUNT(*) AS cnt FROM transactions
-               WHERE portfolio_id = ? AND type = 'REBALANCE' AND reason = ?""",
-            ("us", "年末强制再平衡"),
+               WHERE portfolio_id = ? AND type = 'REBALANCE' AND reason LIKE ?""",
+            ("us", "年末强制再平衡%"),
         ).fetchone()["cnt"]
 
     assert count == 1
@@ -659,7 +670,129 @@ def test_missing_primary_broker_sync_fails_closed_before_execution(temp_db, monk
 
     assert result["run_status"] == "FAILED_EXECUTION"
     assert result["broker_sync_gate"]["code"] == "BROKER_SYNC_MISSING"
+    assert result["insurance"]["state"] == "LOCKED"
     assert called["executor"] == 0
+
+    latest = temp_db.get_latest_insurance_decision("us")
+    assert latest["new_state"] == "LOCKED"
+    assert latest["source_signals"][0]["source"] == "broker"
+    assert latest["source_signals"][0]["evidence"]["code"] == "BROKER_SYNC_MISSING"
+
+
+def test_daily_runner_persists_normal_insurance_decision(temp_db, monkeypatch):
+    temp_db.ensure_portfolio("us", ["SPY", "TLT", "GLD", "SHV"])
+    temp_db.update_portfolio(
+        "us",
+        positions=json.dumps([30_000.0, 20_000.0, 25_000.0, 25_000.0]),
+        stability_balance=10_000.0,
+    )
+    _seed_broker_sync(temp_db, checked_day="2026-12-30")
+
+    monkeypatch.setattr(runner_module, "MarketDataService", _make_market_service("2026-12-30"))
+    monkeypatch.setattr(runner_module, "create_executor", lambda **kwargs: PendingExecutor())
+    monkeypatch.setattr(runner_module, "notify", lambda report: None)
+
+    result = runner_module.DailyRunner(temp_db).run_portfolio("us")
+
+    latest = temp_db.get_latest_insurance_decision("us")
+    assert latest is not None
+    assert latest["new_state"] == result["insurance"]["state"]
+    assert {signal["source"] for signal in latest["source_signals"]} >= {"market", "stability"}
+
+
+def test_daily_runner_uses_persisted_locked_insurance_state(temp_db, monkeypatch):
+    temp_db.ensure_portfolio("us", ["SPY", "TLT", "GLD", "SHV"])
+    _seed_broker_sync(temp_db, checked_day="2026-12-30")
+
+    from engine.insurance import build_authority_decision, InsuranceState
+
+    locked = build_authority_decision(
+        InsuranceState.LOCKED,
+        reasons=["previous hard block"],
+    )
+    _save_insurance_decision(
+        temp_db,
+        portfolio_id="us",
+        previous_state="SAFE",
+        decision=locked,
+        risk_score=1.0,
+        hard_blocks=["previous hard block"],
+        source_signals=[{"source": "broker", "hard_veto": True}],
+    )
+
+    monkeypatch.setattr(runner_module, "MarketDataService", _make_market_service("2026-12-30"))
+    monkeypatch.setattr(runner_module, "create_executor", lambda **kwargs: FilledExecutor())
+    monkeypatch.setattr(runner_module, "notify", lambda report: None)
+
+    result = runner_module.DailyRunner(temp_db).run_portfolio("us")
+
+    assert result["insurance"]["state"] == "LOCKED"
+    assert "Insurance Layer blocked Core rebalance" in result["action"]
+    latest = temp_db.get_latest_insurance_decision("us")
+    assert latest["previous_state"] == "LOCKED"
+    assert latest["new_state"] == "LOCKED"
+
+
+def test_daily_runner_data_fetch_failure_writes_fail_closed_insurance_decision(temp_db, monkeypatch):
+    temp_db.ensure_portfolio("us", ["SPY", "TLT", "GLD", "SHV"])
+
+    class FailingMarketDataService:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def fetch_latest(self, lookback_days=60):
+            raise RuntimeError("data source offline")
+
+    monkeypatch.setattr(runner_module, "MarketDataService", FailingMarketDataService)
+    monkeypatch.setattr(runner_module, "notify", lambda report: None)
+
+    result = runner_module.DailyRunner(temp_db).run_portfolio("us")
+
+    latest = temp_db.get_latest_insurance_decision("us")
+
+    assert result["run_status"] == "FAILED"
+    assert result["insurance"]["decision_id"] == latest["id"]
+    assert latest["portfolio_id"] == "us"
+    assert latest["source_signals"][0]["source"] == "data"
+
+
+def test_daily_runner_blocks_tax_harvest_when_insurance_denies_it(temp_db, monkeypatch):
+    temp_db.ensure_portfolio("us", ["SPY", "TLT", "GLD", "SHV"])
+    _seed_broker_sync(temp_db, checked_day="2026-12-30")
+
+    from engine.insurance import build_authority_decision, InsuranceState
+
+    protected = build_authority_decision(
+        InsuranceState.PROTECTED,
+        reasons=["drawdown protection"],
+    )
+    _save_insurance_decision(
+        temp_db,
+        portfolio_id="us",
+        previous_state="SAFE",
+        decision=protected,
+        risk_score=0.6,
+        hard_blocks=[],
+        source_signals=[{"source": "market"}],
+    )
+
+    calls = {"harvester": 0}
+
+    class ForbiddenHarvester:
+        def __init__(self, *args, **kwargs):
+            calls["harvester"] += 1
+
+    monkeypatch.setattr(runner_module, "MarketDataService", _make_market_service("2026-12-30"))
+    monkeypatch.setattr(runner_module, "TaxLossHarvester", ForbiddenHarvester)
+    monkeypatch.setattr(runner_module, "notify", lambda report: None)
+    monkeypatch.setenv("XIRANG_ENABLE_TAX_HARVEST", "1")
+
+    result = runner_module.DailyRunner(temp_db).run_portfolio("us")
+
+    assert calls["harvester"] == 0
+    assert result["insurance"]["state"] == "PROTECTED"
+    assert result["tax_harvest"]["status"] == "BLOCKED"
+    assert result["tax_harvest"]["insurance_state"] == "PROTECTED"
 
 
 def test_stale_primary_broker_sync_fails_closed_before_execution(temp_db, monkeypatch):
