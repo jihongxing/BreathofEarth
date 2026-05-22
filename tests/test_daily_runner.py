@@ -700,6 +700,31 @@ def test_daily_runner_persists_normal_insurance_decision(temp_db, monkeypatch):
     assert {signal["source"] for signal in latest["source_signals"]} >= {"market", "stability"}
 
 
+def test_daily_runner_revalues_investment_pool(temp_db, monkeypatch):
+    temp_db.ensure_portfolio("us", ["SPY", "TLT", "GLD", "SHV"])
+    temp_db.update_portfolio(
+        "us",
+        positions=json.dumps([30_000.0, 20_000.0, 25_000.0, 25_000.0]),
+        stability_balance=10_000.0,
+    )
+    _seed_broker_sync(temp_db, checked_day="2026-12-30")
+
+    monkeypatch.setattr(runner_module, "MarketDataService", _make_market_service("2026-12-30"))
+    monkeypatch.setattr(runner_module, "create_executor", lambda **kwargs: PendingExecutor())
+    monkeypatch.setattr(runner_module, "notify", lambda report: None)
+
+    result = runner_module.DailyRunner(temp_db).run_portfolio("us")
+
+    pool = temp_db.get_investment_pool("us")
+    snapshot = temp_db.get_latest_pool_nav_snapshot("us")
+
+    assert result["investment_pool"]["id"] == "us"
+    assert pool["nav"] == result["nav"]
+    assert pool["share_price"] == result["investment_pool"]["share_price"]
+    assert snapshot["source"] == "DAILY_RUN"
+    assert snapshot["snapshot_date"] == "2026-12-30"
+
+
 def test_daily_runner_uses_persisted_locked_insurance_state(temp_db, monkeypatch):
     temp_db.ensure_portfolio("us", ["SPY", "TLT", "GLD", "SHV"])
     _seed_broker_sync(temp_db, checked_day="2026-12-30")

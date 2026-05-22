@@ -21,7 +21,9 @@ from fastapi.staticfiles import StaticFiles
 
 from db.database import Database
 from engine.config import validate_config
+from api.auth import validate_auth_config
 from api.routes.auth_routes import router as auth_router
+from api.routes.account_routes import router as account_router
 from api.routes.portfolio_routes import router as portfolio_router
 from api.routes.dashboard_routes import router as dashboard_router
 from api.routes.governance_routes import router as governance_router
@@ -34,6 +36,7 @@ from api.routes.report_routes import router as report_router
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     validate_config()
+    validate_auth_config()
     db = Database()
     app.state.db = db
 
@@ -68,6 +71,7 @@ app.add_middleware(
 
 # 注册路由
 app.include_router(auth_router)
+app.include_router(account_router)
 app.include_router(portfolio_router)
 app.include_router(dashboard_router)
 app.include_router(governance_router)

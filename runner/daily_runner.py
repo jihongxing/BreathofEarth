@@ -1075,6 +1075,22 @@ class DailyRunner:
                         conn=conn,
                     )
                 report["insurance"]["decision_id"] = insurance_decision_id
+                pool = self.db.revalue_investment_pool(
+                    pool_id=portfolio_id,
+                    nav=engine.nav,
+                    actor="daily_runner",
+                    source="DAILY_RUN",
+                    snapshot_date=today,
+                    conn=conn,
+                )
+                report["investment_pool"] = {
+                    "id": pool["id"],
+                    "portfolio_id": pool["portfolio_id"],
+                    "nav": round(float(pool["nav"]), 2),
+                    "shares_outstanding": round(float(pool["shares_outstanding"]), 8),
+                    "share_price": round(float(pool["share_price"]), 8),
+                    "snapshot_id": pool.get("snapshot_id"),
+                }
                 if order:
                     transaction_reason = (
                         f"{action or tx_type or 'Core rebalance'} "

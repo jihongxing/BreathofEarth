@@ -246,11 +246,107 @@ class CashflowEngine:
             note="PROTECTION状态下全额留Stability，下一周期系统自动分配" if state == "PROTECTION" else "确认后资金立即入账，系统按方案分配",
         )
 
+    def request_deposit(
+        self,
+        amount: float,
+        requester: str,
+        account_id: str,
+        portfolio_id: str = "us",
+        currency: str = "USD",
+        note: str = "",
+        external_reference: str = "",
+    ) -> CashflowResult:
+        """创建入金申请，不移动组合资金。"""
+        if amount < MIN_DEPOSIT:
+            return CashflowResult("ERROR", f"最小入金额 ${MIN_DEPOSIT:,.0f}")
+
+        if portfolio_id not in PORTFOLIOS:
+            return CashflowResult("ERROR", f"组合 {portfolio_id} 不存在")
+
+        account = self.db.get_capital_account(account_id)
+        if account is None:
+            return CashflowResult("ERROR", "资产账户不存在")
+
+        with self.db.transaction() as conn:
+            request = self.db.create_deposit_request(
+                account_id=account_id,
+                amount=amount,
+                requested_by=requester,
+                portfolio_id=portfolio_id,
+                currency=currency,
+                note=note,
+                external_reference=external_reference,
+                conn=conn,
+            )
+            request_entry = self.db.record_ledger_entry(
+                account_id=account_id,
+                portfolio_id=portfolio_id,
+                pool_id=portfolio_id,
+                entry_type="DEPOSIT_REQUESTED",
+                amount=amount,
+                currency=currency,
+                actor=requester,
+                source_ref_type="deposit_request",
+                source_ref_id=request["id"],
+                memo="入金申请已提交，等待真实到账确认",
+                conn=conn,
+            )
+            self.db.save_audit_log(
+                "DEPOSIT_REQUESTED",
+                requester,
+                f"入金申请 #{request['id']}，账户 {account_id}，组合 {portfolio_id}，金额 {amount:,.2f} {currency}",
+                conn=conn,
+            )
+
+        return CashflowResult(
+            "REQUESTED",
+            "入金申请已创建，等待管理员确认到账",
+            deposit_request_id=request["id"],
+            ledger_entry_id=request_entry["id"],
+            account_id=account_id,
+            portfolio_id=portfolio_id,
+            amount=round(float(amount), 2),
+            currency=currency,
+            request_status=request["status"],
+        )
+
+    def confirm_deposit_request(
+        self,
+        deposit_request_id: str,
+        confirmer: str,
+        note: str = "",
+        external_reference: str = "",
+    ) -> CashflowResult:
+        """确认真实到账，并把入金写入组合、总账和兼容记录。"""
+        request = self.db.get_deposit_request(deposit_request_id)
+        if request is None:
+            return CashflowResult("ERROR", "入金申请不存在")
+        if request["status"] != "REQUESTED":
+            return CashflowResult("ERROR", f"入金申请状态为 {request['status']}，不能重复确认")
+
+        return self.deposit(
+            amount=float(request["amount"]),
+            depositor=request["requested_by"],
+            portfolio_id=request["portfolio_id"],
+            account_id=request["account_id"],
+            deposit_request_id=deposit_request_id,
+            confirm_actor=confirmer,
+            currency=request.get("currency") or "USD",
+            note=note or request.get("note") or "",
+            external_reference=external_reference or request.get("external_reference") or "",
+        )
+
     def deposit(
         self,
         amount: float,
         depositor: str,
         portfolio_id: str = "us",
+        account_id: str | None = None,
+        deposit_request_id: str | None = None,
+        confirm_actor: str | None = None,
+        currency: str = "USD",
+        note: str = "",
+        external_reference: str = "",
     ) -> CashflowResult:
         decision, insurance_decision_id = self._latest_insurance_authority(portfolio_id)
         authority = self.enforce_deposit_authority(decision)
@@ -268,6 +364,25 @@ class CashflowEngine:
         except ValueError:
             return CashflowResult("ERROR", f"组合 {portfolio_id} 未初始化")
 
+        if account_id:
+            account = self.db.get_capital_account(account_id)
+            if account is None:
+                return CashflowResult("ERROR", "资产账户不存在")
+        else:
+            account = self.db.ensure_legacy_capital_account(depositor, portfolio_id)
+            account_id = account["id"]
+
+        if deposit_request_id:
+            request = self.db.get_deposit_request(deposit_request_id)
+            if request is None:
+                return CashflowResult("ERROR", "入金申请不存在")
+            if request["status"] != "REQUESTED":
+                return CashflowResult("ERROR", f"入金申请状态为 {request['status']}，不能重复确认")
+            if request["account_id"] != account_id or request["portfolio_id"] != portfolio_id:
+                return CashflowResult("ERROR", "入金申请与确认账户或组合不一致")
+            if round(float(request["amount"]), 2) != round(float(amount), 2):
+                return CashflowResult("ERROR", "入金申请金额与确认金额不一致")
+
         positions = _parse_positions(portfolio["positions"])
         stability = float(portfolio.get("stability_balance", 0.0))
         core_sum = sum(positions)
@@ -277,7 +392,9 @@ class CashflowEngine:
         if old_nav > 0 and amount > max_deposit:
             return CashflowResult("ERROR", f"单次入金上限 ${max_deposit:,.0f}")
 
-        deposit_id = str(uuid.uuid4())[:8]
+        deposit_record_id = str(uuid.uuid4())[:8]
+        deposit_request_id = deposit_request_id or f"dep_{uuid.uuid4().hex[:12]}"
+        actor = confirm_actor or depositor
         state = portfolio["state"]
 
         # ── 第一步：100% 进入 Stability ──
@@ -353,6 +470,35 @@ class CashflowEngine:
         allocation_desc = "，".join(desc_parts)
 
         with self.db.transaction() as conn:
+            nav_snapshot = self.db.ensure_initial_pool_nav_snapshot(
+                pool_id=portfolio_id,
+                nav=old_nav,
+                conn=conn,
+            )
+            share_price = float(nav_snapshot["share_price"])
+            if share_price <= 0:
+                return CashflowResult("ERROR", "投资池份额净值无效，不能确认入金")
+            shares_outstanding_before = float(nav_snapshot["shares_outstanding"])
+            shares_issued = round(float(amount) / share_price, 8)
+            shares_outstanding_after = round(shares_outstanding_before + shares_issued, 8)
+            post_share_price = (
+                round(float(new_nav) / shares_outstanding_after, 8)
+                if shares_outstanding_after > 0
+                else share_price
+            )
+
+            if self.db.get_deposit_request(deposit_request_id) is None:
+                self.db.create_deposit_request(
+                    request_id=deposit_request_id,
+                    account_id=account_id,
+                    amount=amount,
+                    requested_by=depositor,
+                    portfolio_id=portfolio_id,
+                    currency=currency,
+                    note=note,
+                    external_reference=external_reference,
+                    conn=conn,
+                )
             self.db.update_portfolio(
                 portfolio_id, conn=conn,
                 nav=round(new_nav, 2),
@@ -368,25 +514,98 @@ class CashflowEngine:
                 conn=conn,
             )
             self.db.save_deposit_record(
-                deposit_id=deposit_id,
+                deposit_id=deposit_record_id,
                 amount=amount,
                 depositor=depositor,
                 portfolio_id=portfolio_id,
                 allocation=json.dumps(allocation_detail),
+                account_id=account_id,
+                deposit_request_id=deposit_request_id,
+                shares_issued=shares_issued,
+                share_price=share_price,
+                conn=conn,
+            )
+            self.db.adjust_account_pool_position(
+                account_id=account_id,
+                pool_id=portfolio_id,
+                shares_delta=shares_issued,
+                cost_basis_delta=amount,
+                conn=conn,
+            )
+            self.db.save_pool_nav_snapshot(
+                pool_id=portfolio_id,
+                nav=new_nav,
+                shares_outstanding=shares_outstanding_after,
+                share_price=post_share_price,
+                source="DEPOSIT_CONFIRMED",
+                conn=conn,
+            )
+            confirmed_entry = self.db.record_ledger_entry(
+                account_id=account_id,
+                portfolio_id=portfolio_id,
+                pool_id=portfolio_id,
+                entry_type="DEPOSIT_CONFIRMED",
+                amount=amount,
+                currency=currency,
+                share_price=share_price,
+                actor=actor,
+                source_ref_type="deposit_request",
+                source_ref_id=deposit_request_id,
+                memo=f"入金到账确认 | legacy_deposit_record={deposit_record_id}",
+                conn=conn,
+            )
+            subscription_entry = self.db.record_ledger_entry(
+                account_id=account_id,
+                portfolio_id=portfolio_id,
+                pool_id=portfolio_id,
+                entry_type="POOL_SUBSCRIPTION",
+                amount=amount,
+                currency=currency,
+                shares_delta=shares_issued,
+                share_price=share_price,
+                actor=actor,
+                source_ref_type="deposit_request",
+                source_ref_id=deposit_request_id,
+                memo="按最近锁定份额净值申购投资池份额",
+                conn=conn,
+            )
+            conn.execute(
+                "UPDATE deposit_records SET ledger_entry_id = ? WHERE id = ?",
+                (subscription_entry["id"], deposit_record_id),
+            )
+            self.db.update_deposit_request(
+                deposit_request_id,
+                status="CONFIRMED",
+                confirmed_by=actor,
+                confirmed_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                external_reference=external_reference,
+                note=note,
+                allocation=json.dumps(allocation_detail),
+                legacy_deposit_record_id=deposit_record_id,
                 conn=conn,
             )
             self.db.save_audit_log(
-                "DEPOSIT", depositor,
-                f"入金 {allocation_desc} → 组合 {portfolio_id} | InsuranceDecision={insurance_decision_id}",
+                "DEPOSIT_CONFIRMED", actor,
+                (
+                    f"入金申请 #{deposit_request_id} 已确认，账户 {account_id}，"
+                    f"{allocation_desc} → 组合 {portfolio_id} | InsuranceDecision={insurance_decision_id}"
+                ),
                 conn=conn,
             )
 
-        logger.info(f"入金完成: {allocation_desc} → {portfolio_id} (#{deposit_id})")
+        logger.info(f"入金完成: {allocation_desc} → {portfolio_id} (#{deposit_request_id})")
 
         return CashflowResult(
             "SUCCESS",
             f"入金 ${amount:,.2f} 成功",
-            deposit_id=deposit_id,
+            deposit_id=deposit_record_id,
+            deposit_request_id=deposit_request_id,
+            account_id=account_id,
+            confirmed_by=actor,
+            ledger_entry_ids=[confirmed_entry["id"], subscription_entry["id"]],
+            shares_issued=shares_issued,
+            share_price=share_price,
+            pool_share_price=post_share_price,
             new_nav=round(new_nav, 2),
             stability_balance=round(new_stability, 2),
             core_balance=round(core_sum_new, 2),
@@ -514,7 +733,11 @@ class CashflowEngine:
             return CashflowResult("ERROR", "出金请求已过期")
 
         portfolio_id = withdrawal["portfolio_id"]
-        amount = withdrawal["amount"]
+        amount = float(withdrawal["amount"])
+        account_id = withdrawal.get("account_id")
+        source_pool_id = withdrawal.get("source_pool_id") or portfolio_id
+        shares_to_redeem = float(withdrawal.get("shares_requested") or 0.0)
+        redemption_share_price = withdrawal.get("share_price")
 
         try:
             portfolio = self.db.get_portfolio(portfolio_id)
@@ -532,6 +755,17 @@ class CashflowEngine:
                 "ERROR",
                 f"出金 ${amount:,.2f} 超过 NAV 的 {MAX_WITHDRAWAL_NAV_RATIO:.0%}（${limit:,.2f}），不允许",
             )
+
+        if account_id:
+            pool = self.db.ensure_investment_pool(source_pool_id, portfolio_id=portfolio_id, nav=nav)
+            redemption_share_price = float(redemption_share_price or pool.get("share_price") or 0.0)
+            if redemption_share_price <= 0:
+                return CashflowResult("ERROR", "投资池份额净值无效，不能执行出金")
+            if shares_to_redeem <= 0:
+                shares_to_redeem = round(amount / redemption_share_price, 8)
+            position = self.db.get_account_pool_position(account_id, source_pool_id)
+            if shares_to_redeem > float(position.get("shares") or 0.0) + 1e-8:
+                return CashflowResult("ERROR", "账户份额不足，不能执行出金")
 
         state = portfolio["state"]
         pf_config = PORTFOLIOS[portfolio_id]
@@ -603,10 +837,7 @@ class CashflowEngine:
                 stability_balance=round(stability, 2),
             )
             self.db.update_withdrawal_status(withdrawal_id, "EXECUTED", conn=conn)
-            conn.execute(
-                "UPDATE withdrawal_requests SET executed_at = ? WHERE id = ?",
-                (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), withdrawal_id),
-            )
+            executed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             self.db.save_transaction(
                 date=now_str,
                 tx_type="WITHDRAWAL",
@@ -616,6 +847,90 @@ class CashflowEngine:
                 portfolio_id=portfolio_id,
                 conn=conn,
             )
+            redemption_entry = None
+            executed_entry = None
+            if account_id:
+                pool = self.db.ensure_investment_pool(
+                    source_pool_id,
+                    portfolio_id=portfolio_id,
+                    nav=nav,
+                    conn=conn,
+                )
+                shares_outstanding_before = float(pool.get("shares_outstanding") or 0.0)
+                shares_outstanding_after = round(max(0.0, shares_outstanding_before - shares_to_redeem), 8)
+                post_share_price = (
+                    round(float(new_nav) / shares_outstanding_after, 8)
+                    if shares_outstanding_after > 0
+                    else float(redemption_share_price)
+                )
+                current_position = self.db.get_account_pool_position(account_id, source_pool_id, conn=conn)
+                current_shares = float(current_position.get("shares") or 0.0)
+                current_cost_basis = float(current_position.get("cost_basis") or 0.0)
+                cost_basis_delta = 0.0
+                if current_shares > 0:
+                    redeem_ratio = min(1.0, shares_to_redeem / current_shares)
+                    cost_basis_delta = -round(current_cost_basis * redeem_ratio, 2)
+                self.db.adjust_account_pool_position(
+                    account_id=account_id,
+                    pool_id=source_pool_id,
+                    shares_delta=-shares_to_redeem,
+                    cost_basis_delta=cost_basis_delta,
+                    conn=conn,
+                )
+                self.db.save_pool_nav_snapshot(
+                    pool_id=source_pool_id,
+                    nav=new_nav,
+                    shares_outstanding=shares_outstanding_after,
+                    share_price=post_share_price,
+                    snapshot_date=now_str,
+                    source="WITHDRAWAL_EXECUTED",
+                    conn=conn,
+                )
+                redemption_entry = self.db.record_ledger_entry(
+                    account_id=account_id,
+                    portfolio_id=portfolio_id,
+                    pool_id=source_pool_id,
+                    entry_type="POOL_REDEMPTION",
+                    amount=amount,
+                    currency=withdrawal.get("currency") or "USD",
+                    shares_delta=-shares_to_redeem,
+                    share_price=float(redemption_share_price),
+                    actor=executor,
+                    source_ref_type="withdrawal_request",
+                    source_ref_id=withdrawal_id,
+                    memo="按申请锁定份额净值赎回投资池份额",
+                    conn=conn,
+                )
+                executed_entry = self.db.record_ledger_entry(
+                    account_id=account_id,
+                    portfolio_id=portfolio_id,
+                    pool_id=source_pool_id,
+                    entry_type="WITHDRAWAL_EXECUTED",
+                    amount=amount,
+                    currency=withdrawal.get("currency") or "USD",
+                    shares_delta=-shares_to_redeem,
+                    share_price=float(redemption_share_price),
+                    actor=executor,
+                    source_ref_type="withdrawal_request",
+                    source_ref_id=withdrawal_id,
+                    memo=f"出金执行，摩擦成本 {friction_cost:.2f}",
+                    conn=conn,
+                )
+                self.db.update_withdrawal_request(
+                    withdrawal_id,
+                    executed_by=executor,
+                    executed_at=executed_at,
+                    shares_redeemed=shares_to_redeem,
+                    ledger_entry_id=redemption_entry["id"],
+                    conn=conn,
+                )
+            else:
+                self.db.update_withdrawal_request(
+                    withdrawal_id,
+                    executed_by=executor,
+                    executed_at=executed_at,
+                    conn=conn,
+                )
             if risk_warning:
                 self.db.save_risk_event(
                     date=now_str,
@@ -627,7 +942,11 @@ class CashflowEngine:
                 )
             self.db.save_audit_log(
                 "WITHDRAWAL_EXECUTED", executor,
-                f"出金执行 #{withdrawal_id}，${amount:,.2f}，摩擦 ${friction_cost:.2f} | InsuranceDecision={insurance_decision_id}",
+                (
+                    f"出金执行 #{withdrawal_id}，账户 {account_id or '-'}，${amount:,.2f}，"
+                    f"赎回份额 {shares_to_redeem:,.8f}，摩擦 ${friction_cost:.2f} "
+                    f"| InsuranceDecision={insurance_decision_id}"
+                ),
                 conn=conn,
             )
 
@@ -641,7 +960,15 @@ class CashflowEngine:
             core_balance=round(core_sum_new, 2),
             deductions=deductions,
             friction_cost=round(friction_cost, 2),
+            account_id=account_id,
+            source_pool_id=source_pool_id,
+            shares_redeemed=round(shares_to_redeem, 8),
+            share_price=float(redemption_share_price) if redemption_share_price is not None else None,
         )
+        if account_id:
+            result_extra["ledger_entry_ids"] = [
+                entry["id"] for entry in [redemption_entry, executed_entry] if entry is not None
+            ]
         if risk_warning:
             result_extra["risk_warning"] = risk_warning
         if protection_warning:
