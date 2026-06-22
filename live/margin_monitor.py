@@ -206,28 +206,32 @@ def run_margin_monitor(
     output_dir: Path = DEFAULT_OUTPUT_DIR,
     portfolio_id: str = "shadow-90-10",
     persist_db: bool = True,
+    no_broker: bool = False,
 ) -> dict[str, Any]:
     timestamp = utc_now().isoformat().replace("+00:00", "Z")
     warnings: list[str] = []
     snapshot = None
     connected = False
-    adapter_name = broker_name
+    adapter_name = "offline" if no_broker else broker_name
 
-    try:
-        adapter = create_broker_adapter(
-            role=broker_role,
-            broker_name=broker_name,
-            mode=BrokerMode.READ_ONLY,
-            assets=["SPY", "TLT", "GLD", "SHV", "QQQ"],
-        )
-        adapter_name = adapter.broker_name
-        connected = bool(adapter.connect())
-        if not connected:
-            warnings.append("broker read-only connection unavailable")
-        else:
-            snapshot = adapter.get_account_snapshot()
-    except Exception as exc:
-        warnings.append(f"broker margin snapshot unavailable: {exc}")
+    if no_broker:
+        warnings.append("broker margin snapshot skipped: no_broker observation mode")
+    else:
+        try:
+            adapter = create_broker_adapter(
+                role=broker_role,
+                broker_name=broker_name,
+                mode=BrokerMode.READ_ONLY,
+                assets=["SPY", "TLT", "GLD", "SHV", "QQQ"],
+            )
+            adapter_name = adapter.broker_name
+            connected = bool(adapter.connect())
+            if not connected:
+                warnings.append("broker read-only connection unavailable")
+            else:
+                snapshot = adapter.get_account_snapshot()
+        except Exception as exc:
+            warnings.append(f"broker margin snapshot unavailable: {exc}")
 
     fields = extract_margin_fields(snapshot.raw) if snapshot is not None else {}
     status, field_warnings = margin_status(fields)
@@ -277,6 +281,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--broker-role", default="primary")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--portfolio-id", default="shadow-90-10")
+    parser.add_argument("--no-broker", action="store_true")
     parser.add_argument("--skip-db", action="store_true")
     return parser.parse_args(argv)
 
@@ -288,6 +293,7 @@ def main(argv: list[str] | None = None) -> None:
         broker_role=args.broker_role,
         output_dir=args.output_dir,
         portfolio_id=args.portfolio_id,
+        no_broker=args.no_broker,
         persist_db=not args.skip_db,
     )
     print(f"Margin monitor {report['status']} | output={report['output_path']}")
@@ -299,4 +305,3 @@ def main(argv: list[str] | None = None) -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -185,6 +185,7 @@ def run_stage95_shadow_cycle(
             broker_role=broker_role,
             output_dir=output_dir,
             portfolio_id=portfolio_id,
+            no_broker=no_broker,
             persist_db=persist_db,
         )
         components["margin_snapshot"] = _component_from_report("margin_snapshot", margin_report)

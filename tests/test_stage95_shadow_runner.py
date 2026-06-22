@@ -4,7 +4,10 @@ from live import stage95_shadow_runner
 
 
 def test_stage95_shadow_cycle_persists_combined_readonly_report(monkeypatch, tmp_path):
+    calls = {}
+
     def fake_shadow_sync(**kwargs):
+        calls["shadow_no_broker"] = kwargs.get("no_broker")
         return {
             "timestamp": "2026-06-23T10:00:00Z",
             "status": "OK",
@@ -17,6 +20,7 @@ def test_stage95_shadow_cycle_persists_combined_readonly_report(monkeypatch, tmp
         }
 
     def fake_margin_monitor(**kwargs):
+        calls["margin_no_broker"] = kwargs.get("no_broker")
         return {
             "timestamp": "2026-06-23T10:01:00Z",
             "status": "OBSERVED",
@@ -41,6 +45,7 @@ def test_stage95_shadow_cycle_persists_combined_readonly_report(monkeypatch, tmp
     assert report["live_leverage_approved"] is False
     assert report["trading_disabled"] is True
     assert report["components"]["shadow_sync"]["trading_disabled"] is True
+    assert calls == {"shadow_no_broker": True, "margin_no_broker": True}
     latest = tmp_path / "latest_stage95_cycle.json"
     assert latest.exists()
     payload = json.loads(latest.read_text(encoding="utf-8"))

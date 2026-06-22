@@ -105,3 +105,22 @@ def test_margin_monitor_unavailable_when_broker_cannot_connect(monkeypatch, tmp_
     assert report["requires_attention"] is True
     assert report["warnings"]
 
+
+def test_margin_monitor_no_broker_mode_never_creates_adapter(monkeypatch, tmp_path):
+    def fail_if_called(**kwargs):
+        raise AssertionError("no_broker margin monitor must not create a broker adapter")
+
+    monkeypatch.setattr(margin_monitor, "create_broker_adapter", fail_if_called)
+
+    report = margin_monitor.run_margin_monitor(
+        output_dir=tmp_path,
+        persist_db=False,
+        no_broker=True,
+    )
+
+    assert report["status"] == "UNAVAILABLE"
+    assert report["requires_attention"] is True
+    assert report["broker"]["name"] == "offline"
+    assert report["broker"]["connected"] is False
+    assert report["trading_disabled"] is True
+    assert "no_broker" in " ".join(report["warnings"])
