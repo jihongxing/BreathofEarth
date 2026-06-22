@@ -111,6 +111,14 @@ class Database:
             conn.execute(
                 "UPDATE withdrawal_requests SET source_pool_id = portfolio_id WHERE source_pool_id IS NULL"
             )
+            conn.execute(
+                """CREATE INDEX IF NOT EXISTS idx_withdrawal_requests_account
+                   ON withdrawal_requests(account_id, status, created_at)"""
+            )
+            conn.execute(
+                """CREATE INDEX IF NOT EXISTS idx_withdrawal_requests_pool
+                   ON withdrawal_requests(source_pool_id, status, created_at)"""
+            )
         if self._table_exists(conn, "withdrawal_approvals"):
             approval_cols = {c["name"] for c in self._table_columns(conn, "withdrawal_approvals")}
             migrations = {

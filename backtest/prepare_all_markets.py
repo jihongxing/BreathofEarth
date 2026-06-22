@@ -50,6 +50,30 @@ def no_proxy():
                 os.environ[k] = v
 
 
+def validate_positive_series(series: pd.Series, ticker: str, source: str) -> pd.Series:
+    if series.empty:
+        raise RuntimeError(f"{source} returned empty prices for {ticker}")
+    numeric = pd.to_numeric(series, errors="coerce").dropna()
+    if numeric.empty:
+        raise RuntimeError(f"{source} returned no numeric prices for {ticker}")
+    bad = numeric[numeric <= 0]
+    if not bad.empty:
+        samples = ", ".join(
+            f"{idx.date() if hasattr(idx, 'date') else idx}={value:.4f}"
+            for idx, value in bad.head(5).items()
+        )
+        raise RuntimeError(
+            f"{source} returned non-positive prices for {ticker}: {samples}"
+        )
+    return series
+
+
+def validate_positive_frame(df: pd.DataFrame, source: str) -> pd.DataFrame:
+    for col in [c for c in df.columns if c != "MONEY"]:
+        validate_positive_series(df[col].dropna(), col, source)
+    return df
+
+
 class Fetcher:
     def __init__(self, min_interval_sec: float, max_retries: int):
         self.min_interval_sec = min_interval_sec
@@ -71,6 +95,7 @@ class Fetcher:
         if s.empty:
             raise RuntimeError("adj close is empty")
         s.name = ticker
+        s = validate_positive_series(s, ticker, "yfinance Adj Close")
         return s
 
     def _ak_cn(self, ticker: str, start: str, end: str) -> pd.Series:
@@ -89,6 +114,7 @@ class Fetcher:
                 s = s[(s.index >= s_ts) & (s.index <= e_ts)].dropna()
                 if not s.empty:
                     s.name = ticker
+                    s = validate_positive_series(s, ticker, "akshare_sina")
                     return s
         except Exception:
             pass
@@ -108,6 +134,7 @@ class Fetcher:
         if s.empty:
             raise RuntimeError("akshare close empty")
         s.name = ticker
+        s = validate_positive_series(s, ticker, "akshare_em")
         return s
 
     def download(self, ticker: str, start: str, end: str) -> pd.Series:
@@ -139,6 +166,7 @@ def sha256(path: Path) -> str:
 
 
 def save_series(series: pd.Series, path: Path):
+    series = validate_positive_series(series.dropna(), series.name or path.stem, f"raw write {path.name}")
     df = series.to_frame("adj_close")
     df.index.name = "date"
     df.sort_index().to_csv(path)
@@ -148,6 +176,7 @@ def load_series(path: Path, ticker: str) -> pd.Series:
     df = pd.read_csv(path, index_col="date", parse_dates=True).sort_index()
     s = df["adj_close"].copy()
     s.name = ticker
+    s = validate_positive_series(s, ticker, f"raw cache {path.name}")
     return s
 
 
@@ -190,6 +219,7 @@ def build_market(name: str, cfg: MarketConfig, data: dict[str, pd.Series]) -> Pa
         prices["MONEY"] = money
 
     prices.index.name = "date"
+    validate_positive_frame(prices, f"assembled market {name}")
     out = DATA_DIR / cfg.file
     prices.to_csv(out)
     print(f"  ✓ {name}: {out} | {len(prices)} rows")

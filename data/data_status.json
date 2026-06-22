@@ -1,5 +1,5 @@
 {
-  "updated_at": "2026-04-04 01:25:37",
+  "updated_at": "2026-05-02 23:28:40",
   "markets_updated": [
     "us",
     "cn",
@@ -10,86 +10,86 @@
   ],
   "tickers": {
     "SPY": {
-      "rows": 5345,
+      "rows": 5364,
       "start": "2005-01-03",
-      "end": "2026-04-02",
-      "sha256": "1fe76f58a6f805f8d5bd671b44d046a319b83751378a206f7cbc4de15ec44919"
+      "end": "2026-04-30",
+      "sha256": "c7493fcd03a4fd0ec1dabae6857658d964094fe73b46e517c2ff7a12c8eeee82"
     },
     "TLT": {
-      "rows": 5346,
+      "rows": 5365,
       "start": "2005-01-03",
-      "end": "2026-04-02",
-      "sha256": "62c58e020e69c1613d6f09345f558858827db2ad27df4192cc1dac7281f1afda"
+      "end": "2026-04-30",
+      "sha256": "942e851fc7a805538d75566fb4dfce41fd01f5ad16e276572c413150ce289517"
     },
     "GLD": {
-      "rows": 5346,
+      "rows": 5365,
       "start": "2005-01-03",
-      "end": "2026-04-02",
-      "sha256": "ba971b43ae9cad91cacc4a84bebd900106fa684072863551ba97da0870400ecc"
+      "end": "2026-04-30",
+      "sha256": "45cdc505fd730013a97342968159ef4f1b119dc8a1bf323040a4c9a089b1b9a3"
     },
     "SHV": {
-      "rows": 5346,
+      "rows": 5365,
       "start": "2005-01-03",
-      "end": "2026-04-02",
-      "sha256": "cf673bc19e38a9e7eced8f22b38cc628b28a807457eeddb0e5499034a9bb37b8"
+      "end": "2026-04-30",
+      "sha256": "6356496295207413317d00ad95efd5f11ea1a95157de6100d380b6972db8f665"
     },
     "510300.SS": {
-      "rows": 3366,
+      "rows": 3384,
       "start": "2012-05-28",
-      "end": "2026-04-03",
-      "sha256": "1f6c56629957f4d6017e1a9780d3ab4cf18944aae25872890cf6fb1bdc3a502a"
+      "end": "2026-04-30",
+      "sha256": "f1a98f4aeb655334e32b64f9cc4999234188cc449452cb656c5819215bf65d74"
     },
     "511010.SS": {
-      "rows": 3156,
+      "rows": 3174,
       "start": "2013-04-09",
-      "end": "2026-04-03",
-      "sha256": "6a199f084af97f3a3399f459caaa28ab8c0718d3f21811b9be4aa7a3c9bbd379"
+      "end": "2026-04-30",
+      "sha256": "5cdff04d7f47315967776902143dde83875f8a774b8479f8bc4b0643290d92fc"
     },
     "518880.SS": {
-      "rows": 3083,
+      "rows": 3101,
       "start": "2013-07-29",
-      "end": "2026-04-03",
-      "sha256": "4c2e2a80845db5e9676bd95f948d64b3a3bb4bbdb1933b351eec47a3374e9431"
+      "end": "2026-04-30",
+      "sha256": "d1531d8db6d4e7645e7c097e016dcf638aeac2aa5a1f399dca85dfc927dd22d0"
     },
     "513500.SS": {
-      "rows": 2968,
+      "rows": 2986,
       "start": "2014-01-15",
-      "end": "2026-04-03",
-      "sha256": "1d7bdc3b2b1970aaba4bf749c8fc802e3185e9bcd67e94e0df1829091b30e91b"
+      "end": "2026-04-30",
+      "sha256": "07faefe8f174b703b69ed7a7a3d63ef21e51fe5dc0e4ff3b4e2f7eb6e2acf267"
     },
     "EZU": {
-      "rows": 5344,
+      "rows": 5364,
       "start": "2005-01-03",
-      "end": "2026-04-02",
-      "sha256": "c2340bc7043596caa44122fb014746e45dc346219c4817b69441133ae06a3aa5"
+      "end": "2026-05-01",
+      "sha256": "e3fd7752c55c02880afc523b3232f568eff2b4a8366fcd015dcd126285dcee54"
     },
     "BWX": {
-      "rows": 4647,
+      "rows": 4667,
       "start": "2007-10-11",
-      "end": "2026-04-02",
-      "sha256": "edcf84f92d9f7992446ab183835aae47083718c606f8ebe1dee14d18860eaf20"
+      "end": "2026-05-01",
+      "sha256": "396c8ea6734dd2978ea766041899d62fab087a64629203b1f7b842b5ba558ebd"
     },
     "EPI": {
-      "rows": 4554,
+      "rows": 4574,
       "start": "2008-02-26",
-      "end": "2026-04-02",
-      "sha256": "4d17403ecc8bbe7966ec71b6685e13a5dc068400cd3085d5bbe2f265a1e10b72"
+      "end": "2026-05-01",
+      "sha256": "e89db05070c4f38a64d9a91b7b48ec5932e38ade93b73ab15c08ec419b998abb"
     },
     "EMB": {
-      "rows": 2176,
+      "rows": 2196,
       "start": "2017-08-07",
-      "end": "2026-04-02",
-      "sha256": "7366dbf04852dedab7889ab991c3d3d3b04b1238d49e9303dce54395f63b232d"
+      "end": "2026-05-01",
+      "sha256": "bd8c0326a09149d600210932a56accb9ab75f77526fa342813e3791e7ed419e2"
     },
     "VT": {
-      "rows": 4469,
+      "rows": 4489,
       "start": "2008-06-26",
-      "end": "2026-04-02",
-      "sha256": "e5bf427a55743fb5f9df3ecec197c5bf0d17d6cbaafc615c3b743a8d1409da4a"
+      "end": "2026-05-01",
+      "sha256": "1d224ce3a6b66f3a2bc1400b0e694b955812baa534d052c3870bfcdd03da89dd"
     }
   },
   "rate_limiter": {
-    "hourly_count": 0,
+    "hourly_count": 5,
     "hourly_limit": 60,
     "consecutive_failures": 0
   }

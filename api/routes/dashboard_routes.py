@@ -11,7 +11,7 @@ from fastapi import status
 from db.database import Database
 from engine.config import PORTFOLIOS
 from engine.execution.factory import get_broker_topology
-from api.deps import get_db, get_current_user
+from api.deps import ensure_portfolio_access, get_accessible_portfolio_ids, get_db, get_current_user, is_admin_user
 
 router = APIRouter(prefix="/api", tags=["仪表盘"])
 
@@ -747,6 +747,7 @@ async def get_dashboard(
     pf_config = PORTFOLIOS.get(portfolio_id)
     if not pf_config:
         return {"error": f"组合 {portfolio_id} 不存在"}
+    ensure_portfolio_access(db, user, portfolio_id, permission="view")
 
     # 快照（NAV 曲线 + 回撤 + 权重）
     snapshots = db.get_snapshots(portfolio_id, limit=days)
@@ -837,6 +838,7 @@ async def get_broker_sync(
     """获取最新券商同步与对账状态（只读）"""
     if portfolio_id not in PORTFOLIOS:
         raise HTTPException(status_code=404, detail=f"组合 {portfolio_id} 不存在")
+    ensure_portfolio_access(db, user, portfolio_id, permission="view")
     return _get_broker_sync_payload(db, portfolio_id)
 
 
@@ -848,6 +850,7 @@ async def get_snapshots(
     user: dict = Depends(get_current_user),
 ):
     """获取历史快照"""
+    ensure_portfolio_access(db, user, portfolio_id, permission="view")
     snapshots = db.get_snapshots(portfolio_id, limit=limit)
     for s in snapshots:
         s["positions"] = json.loads(s["positions"]) if isinstance(s["positions"], str) else s["positions"]
@@ -863,6 +866,7 @@ async def get_transactions(
     user: dict = Depends(get_current_user),
 ):
     """获取交易记录"""
+    ensure_portfolio_access(db, user, portfolio_id, permission="view")
     with db._conn() as conn:
         rows = conn.execute(
             "SELECT * FROM transactions WHERE portfolio_id = ? ORDER BY date DESC LIMIT ?",
@@ -874,22 +878,33 @@ async def get_transactions(
 @router.get("/report")
 async def get_monthly_report(
     lang: str = Query(default="zh", pattern="^(zh|en)$"),
+    db: Database = Depends(get_db),
     user: dict = Depends(get_current_user),
 ):
     """获取家族月报（HTML 格式，向后兼容）"""
     from fastapi.responses import HTMLResponse
     from runner.dashboard import get_latest_report_html
+    ensure_portfolio_access(db, user, "default", permission="view")
     html = get_latest_report_html(lang=lang)
     return HTMLResponse(content=html)
 
 
 @router.get("/reports")
 async def list_reports(
+    db: Database = Depends(get_db),
     user: dict = Depends(get_current_user),
 ):
     """列出所有月报（按年月聚合，含组合信息）"""
     from runner.dashboard import list_reports as _list_reports
-    return _list_reports()
+    reports = _list_reports()
+    if is_admin_user(user):
+        return reports
+    allowed = get_accessible_portfolio_ids(db, user, permission="view")
+    return [
+        r
+        for r in reports
+        if not isinstance(r, dict) or not r.get("portfolio_id") or r.get("portfolio_id") in allowed
+    ]
 
 
 @router.get("/reports/{year}/{month}/{portfolio_id}")
@@ -898,11 +913,13 @@ async def get_portfolio_report(
     month: int,
     portfolio_id: str,
     lang: str = Query(default="zh", pattern="^(zh|en)$"),
+    db: Database = Depends(get_db),
     user: dict = Depends(get_current_user),
 ):
     """获取指定月份、指定组合的月报 HTML"""
     from fastapi.responses import HTMLResponse
     from runner.dashboard import get_report_html
+    ensure_portfolio_access(db, user, portfolio_id, permission="view")
     html = get_report_html(year, month, portfolio_id, lang=lang)
     return HTMLResponse(content=html)
 
@@ -917,6 +934,8 @@ async def generate_report(
     """手动生成月报（所有组合）"""
     from runner.dashboard import generate_and_save
     push = False
+    if not is_admin_user(user):
+        raise HTTPException(status_code=403, detail="无权生成全局报表")
     path = generate_and_save(days=days, push=push, lang=lang)
     msg = "报告已生成" if lang == "zh" else "Report generated"
     return {"message": msg, "path": str(path) if path else None}
@@ -927,6 +946,7 @@ async def generate_portfolio_report_api(
     portfolio_id: str,
     days: int = Query(default=90, ge=7, le=365),
     lang: str = Query(default="zh", pattern="^(zh|en)$"),
+    db: Database = Depends(get_db),
     user: dict = Depends(get_current_user),
 ):
     """为指定组合生成月报"""
@@ -934,6 +954,7 @@ async def generate_portfolio_report_api(
     from engine.config import PORTFOLIOS
     if portfolio_id not in PORTFOLIOS:
         raise HTTPException(status_code=404, detail=f"组合不存在: {portfolio_id}")
+    ensure_portfolio_access(db, user, portfolio_id, permission="view")
     path = generate_and_save(days=days, portfolio_id=portfolio_id, push=False, lang=lang)
     msg = f"{portfolio_id} 报告已生成" if lang == "zh" else f"{portfolio_id} report generated"
     return {"message": msg, "path": str(path) if path else None}

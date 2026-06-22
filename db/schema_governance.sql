@@ -40,12 +40,6 @@ CREATE TABLE IF NOT EXISTS withdrawal_approvals (
     UNIQUE(withdrawal_id, approver)
 );
 
-CREATE INDEX IF NOT EXISTS idx_withdrawal_requests_account
-ON withdrawal_requests(account_id, status, created_at);
-
-CREATE INDEX IF NOT EXISTS idx_withdrawal_requests_pool
-ON withdrawal_requests(source_pool_id, status, created_at);
-
 -- 审计日志
 CREATE TABLE IF NOT EXISTS audit_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
