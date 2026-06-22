@@ -56,7 +56,14 @@ Default posture: no real orders.
 
 `live.margin_monitor` must report missing broker/margin data as `UNAVAILABLE` or `PARTIAL`, never as safe.
 
-Real execution requires explicit broker environment variables, whitelist gates, broker sync coverage, reconciliation, audit persistence, and human approval. Withdrawals are always human-governed.
+Real execution requires all of the following before any live Core executor can even be created:
+
+- global Core execution gate: `XIRANG_ENABLE_LIVE_CORE_EXECUTION=1`
+- human approval reference: `XIRANG_LIVE_CORE_APPROVAL_ID`
+- broker-level order submission gate, such as `IBKR_ENABLE_ORDER_SUBMISSION=1`
+- whitelist gates, broker sync coverage, reconciliation, audit persistence, and post-execution reconciliation
+
+Missing any gate must fail closed before broker order submission. Withdrawals are always human-governed.
 
 ## Frontend Boundary
 

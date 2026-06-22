@@ -90,6 +90,11 @@ def _save_insurance_decision(db, **kwargs):
         return db.save_insurance_decision(**kwargs)
 
 
+def _enable_live_core_execution(monkeypatch, approval_id: str = "approval-test-001"):
+    monkeypatch.setenv("XIRANG_ENABLE_LIVE_CORE_EXECUTION", "1")
+    monkeypatch.setenv("XIRANG_LIVE_CORE_APPROVAL_ID", approval_id)
+
+
 class PendingExecutor:
     def translate_orders(self, current_positions, target_weights, total_nav, current_prices):
         return [
@@ -412,6 +417,7 @@ def test_missing_broker_receipt_enters_manual_intervention_whitelist(temp_db, mo
     monkeypatch.setattr(runner_module, "create_executor", lambda **kwargs: BrokerReceiptMissingExecutor())
     monkeypatch.setattr(runner_module, "notify", lambda report: None)
     monkeypatch.setenv("XIRANG_EXECUTOR", "auto")
+    _enable_live_core_execution(monkeypatch)
 
     result = runner_module.DailyRunner(temp_db).run_portfolio("us")
 
@@ -428,6 +434,7 @@ def test_excessive_slippage_enters_manual_intervention_whitelist(temp_db, monkey
     monkeypatch.setattr(runner_module, "create_executor", lambda **kwargs: HighSlippageExecutor())
     monkeypatch.setattr(runner_module, "notify", lambda report: None)
     monkeypatch.setenv("XIRANG_EXECUTOR", "auto")
+    _enable_live_core_execution(monkeypatch)
 
     result = runner_module.DailyRunner(temp_db).run_portfolio("us")
 
@@ -921,6 +928,56 @@ def test_broker_sync_time_policy_is_configurable_per_market(temp_db, monkeypatch
     assert result["action"] == "年末强制再平衡"
 
 
+def test_live_execution_global_gate_blocks_before_executor_creation(temp_db, monkeypatch):
+    temp_db.ensure_portfolio("us", ["SPY", "TLT", "GLD", "SHV"])
+    _seed_broker_sync(temp_db, checked_day="2026-12-30")
+
+    called = {"executor": 0}
+
+    def fail_if_called(**kwargs):
+        called["executor"] += 1
+        raise AssertionError("live core global gate must block before executor creation")
+
+    monkeypatch.setattr(runner_module, "MarketDataService", _make_market_service("2026-12-30"))
+    monkeypatch.setattr(runner_module, "create_executor", fail_if_called)
+    monkeypatch.setattr(runner_module, "notify", lambda report: None)
+    monkeypatch.setenv("XIRANG_EXECUTOR", "auto")
+    monkeypatch.delenv("XIRANG_ENABLE_LIVE_CORE_EXECUTION", raising=False)
+    monkeypatch.delenv("XIRANG_LIVE_CORE_APPROVAL_ID", raising=False)
+
+    result = runner_module.DailyRunner(temp_db).run_portfolio("us")
+
+    assert result["run_status"] == "FAILED_EXECUTION"
+    assert result["execution_policy_gate"]["code"] == "LIVE_EXECUTION_GLOBAL_DISABLED"
+    assert result["execution"]["orders"] == []
+    assert called["executor"] == 0
+
+
+def test_live_execution_requires_manual_approval_reference(temp_db, monkeypatch):
+    temp_db.ensure_portfolio("us", ["SPY", "TLT", "GLD", "SHV"])
+    _seed_broker_sync(temp_db, checked_day="2026-12-30")
+
+    called = {"executor": 0}
+
+    def fail_if_called(**kwargs):
+        called["executor"] += 1
+        raise AssertionError("missing approval id must block before executor creation")
+
+    monkeypatch.setattr(runner_module, "MarketDataService", _make_market_service("2026-12-30"))
+    monkeypatch.setattr(runner_module, "create_executor", fail_if_called)
+    monkeypatch.setattr(runner_module, "notify", lambda report: None)
+    monkeypatch.setenv("XIRANG_EXECUTOR", "auto")
+    monkeypatch.setenv("XIRANG_ENABLE_LIVE_CORE_EXECUTION", "1")
+    monkeypatch.delenv("XIRANG_LIVE_CORE_APPROVAL_ID", raising=False)
+
+    result = runner_module.DailyRunner(temp_db).run_portfolio("us")
+
+    assert result["run_status"] == "FAILED_EXECUTION"
+    assert result["execution_policy_gate"]["code"] == "LIVE_EXECUTION_APPROVAL_MISSING"
+    assert result["execution"]["orders"] == []
+    assert called["executor"] == 0
+
+
 def test_live_execution_market_must_be_whitelisted_per_portfolio(temp_db, monkeypatch):
     temp_db.ensure_portfolio("cn", ["510300.SS", "511010.SS", "518880.SS", "MONEY"])
     _seed_broker_sync(
@@ -935,6 +992,7 @@ def test_live_execution_market_must_be_whitelisted_per_portfolio(temp_db, monkey
     monkeypatch.setattr(runner_module, "create_executor", lambda **kwargs: FilledBrokerReceiptExecutor())
     monkeypatch.setattr(runner_module, "notify", lambda report: None)
     monkeypatch.setenv("XIRANG_EXECUTOR", "auto")
+    _enable_live_core_execution(monkeypatch)
 
     result = runner_module.DailyRunner(temp_db).run_portfolio("cn")
 
@@ -962,6 +1020,7 @@ def test_live_execution_blocks_single_order_notional_above_limit(temp_db, monkey
     monkeypatch.setattr(runner_module, "create_executor", lambda **kwargs: LargeOrderExecutor())
     monkeypatch.setattr(runner_module, "notify", lambda report: None)
     monkeypatch.setenv("XIRANG_EXECUTOR", "auto")
+    _enable_live_core_execution(monkeypatch)
 
     result = runner_module.DailyRunner(temp_db).run_portfolio("us")
 
@@ -988,6 +1047,7 @@ def test_post_execution_reconciliation_must_match_before_local_rebalance(temp_db
     monkeypatch.setattr(runner_module, "BrokerSyncService", StubPostExecutionSyncService)
     monkeypatch.setattr(runner_module, "notify", lambda report: None)
     monkeypatch.setenv("XIRANG_EXECUTOR", "auto")
+    _enable_live_core_execution(monkeypatch)
 
     result = runner_module.DailyRunner(temp_db).run_portfolio("us")
 
@@ -1005,6 +1065,7 @@ def test_successful_live_execution_persists_broker_audit_events(temp_db, monkeyp
     monkeypatch.setattr(runner_module, "BrokerSyncService", StubPostExecutionSyncService)
     monkeypatch.setattr(runner_module, "notify", lambda report: None)
     monkeypatch.setenv("XIRANG_EXECUTOR", "auto")
+    _enable_live_core_execution(monkeypatch)
 
     result = runner_module.DailyRunner(temp_db).run_portfolio("us")
 
@@ -1040,6 +1101,7 @@ def test_post_execution_reconciliation_drift_enters_manual_review(temp_db, monke
     monkeypatch.setattr(runner_module, "BrokerSyncService", DriftSyncService)
     monkeypatch.setattr(runner_module, "notify", lambda report: None)
     monkeypatch.setenv("XIRANG_EXECUTOR", "auto")
+    _enable_live_core_execution(monkeypatch)
 
     result = runner_module.DailyRunner(temp_db).run_portfolio("us")
 
@@ -1075,6 +1137,7 @@ def test_post_execution_reconciliation_broken_fails_closed(temp_db, monkeypatch)
     monkeypatch.setattr(runner_module, "BrokerSyncService", BrokenSyncService)
     monkeypatch.setattr(runner_module, "notify", lambda report: None)
     monkeypatch.setenv("XIRANG_EXECUTOR", "auto")
+    _enable_live_core_execution(monkeypatch)
 
     result = runner_module.DailyRunner(temp_db).run_portfolio("us")
 

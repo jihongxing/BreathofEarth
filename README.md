@@ -120,7 +120,13 @@ python -m live.stage95_observation_summary --shadow-dir data/shadow --expected-c
   - 模拟券商接口
   - 用于 Shadow / Sandbox / 回归测试
 
-真实执行不是默认开启的。即使代码已具备能力，也必须显式开启券商级环境变量，并通过：
+真实执行不是默认开启的。即使代码已具备能力，也必须先通过 Core 层总闸门、人工批准引用和券商级开关：
+
+- `XIRANG_ENABLE_LIVE_CORE_EXECUTION=1`
+- `XIRANG_LIVE_CORE_APPROVAL_ID=<人工批准编号>`
+- `IBKR_ENABLE_ORDER_SUBMISSION=1` 或对应券商级提交开关
+
+随后仍必须通过：
 
 - 券商同步覆盖交易日
 - 对账不漂移
