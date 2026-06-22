@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timedelta
 
 import pandas as pd
@@ -14,6 +15,7 @@ def isolated_live_data(tmp_path, monkeypatch):
 
     monkeypatch.setattr(dm_mod, "DATA_DIR", data_dir)
     monkeypatch.setattr(dm_mod, "RAW_DIR", raw_dir)
+    monkeypatch.setattr(dm_mod, "STATUS_FILE", data_dir / "data_status.json")
     monkeypatch.setattr(dm_mod, "FETCH_STATE_FILE", data_dir / "data_fetch_state.json")
     monkeypatch.setattr(
         dm_mod,
@@ -217,3 +219,21 @@ def test_generate_etf_daily_rejects_non_positive_prices(isolated_live_data):
 
     with pytest.raises(RuntimeError, match="non-positive prices"):
         manager._generate_etf_daily(ticker_data)
+
+
+def test_manifest_and_status_include_all_raw_cache_tickers(isolated_live_data):
+    data_dir = isolated_live_data
+    _write_raw(data_dir, "SPY", ["2026-05-20", "2026-05-21"])
+    _write_raw(data_dir, "QQQ", ["2026-05-20", "2026-05-21"])
+
+    manager = dm_mod.DataManager(min_interval=0)
+    manager._save_manifest([], {})
+    manager._save_status([], {})
+
+    manifest = json.loads((data_dir / "data_manifest.json").read_text(encoding="utf-8"))
+    status = json.loads((data_dir / "data_status.json").read_text(encoding="utf-8"))
+
+    assert set(manifest["tickers"]) == {"QQQ", "SPY"}
+    assert set(status["tickers"]) == {"QQQ", "SPY"}
+    assert manifest["tickers"]["QQQ"]["sha256"]
+    assert status["tickers"]["QQQ"]["rows"] == 2

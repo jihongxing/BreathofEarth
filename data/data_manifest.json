@@ -1,63 +1,39 @@
 {
-  "generated_at_utc": "2026-05-02T23:28:40.047554",
+  "generated_at_utc": "2026-06-23T04:09:53.907253",
   "source": "data_manager_v2",
   "policy": {
     "backtest_mode": "local_only"
   },
   "tickers": {
-    "SPY": {
-      "rows": 5364,
-      "start": "2005-01-03",
-      "end": "2026-04-30",
-      "sha256": "c7493fcd03a4fd0ec1dabae6857658d964094fe73b46e517c2ff7a12c8eeee82"
-    },
-    "TLT": {
-      "rows": 5365,
-      "start": "2005-01-03",
-      "end": "2026-04-30",
-      "sha256": "942e851fc7a805538d75566fb4dfce41fd01f5ad16e276572c413150ce289517"
-    },
-    "GLD": {
-      "rows": 5365,
-      "start": "2005-01-03",
-      "end": "2026-04-30",
-      "sha256": "45cdc505fd730013a97342968159ef4f1b119dc8a1bf323040a4c9a089b1b9a3"
-    },
-    "SHV": {
-      "rows": 5365,
-      "start": "2005-01-03",
-      "end": "2026-04-30",
-      "sha256": "6356496295207413317d00ad95efd5f11ea1a95157de6100d380b6972db8f665"
-    },
     "510300.SS": {
-      "rows": 3384,
+      "rows": 3417,
       "start": "2012-05-28",
-      "end": "2026-04-30",
-      "sha256": "f1a98f4aeb655334e32b64f9cc4999234188cc449452cb656c5819215bf65d74"
+      "end": "2026-06-22",
+      "sha256": "6b48bcff7fffbd628034aac4a55ec4c50775a57d38076fd1037386f2aca45cf5"
     },
     "511010.SS": {
-      "rows": 3174,
+      "rows": 3207,
       "start": "2013-04-09",
-      "end": "2026-04-30",
-      "sha256": "5cdff04d7f47315967776902143dde83875f8a774b8479f8bc4b0643290d92fc"
-    },
-    "518880.SS": {
-      "rows": 3101,
-      "start": "2013-07-29",
-      "end": "2026-04-30",
-      "sha256": "d1531d8db6d4e7645e7c097e016dcf638aeac2aa5a1f399dca85dfc927dd22d0"
+      "end": "2026-06-22",
+      "sha256": "64b05837a6e5a36a2cce01d1f182289d7190f8e1e24b6cb2be49ce9b033fbf86"
     },
     "513500.SS": {
-      "rows": 2986,
+      "rows": 3019,
       "start": "2014-01-15",
-      "end": "2026-04-30",
-      "sha256": "07faefe8f174b703b69ed7a7a3d63ef21e51fe5dc0e4ff3b4e2f7eb6e2acf267"
+      "end": "2026-06-22",
+      "sha256": "3a07110085c69f6969964b03d3e9eb806f1397c1133d001e18080cbc2f0fc1c2"
     },
-    "EZU": {
-      "rows": 5364,
+    "518880.SS": {
+      "rows": 3134,
+      "start": "2013-07-29",
+      "end": "2026-06-22",
+      "sha256": "c8b38e1fd2a1286c066fa5a01ca3d483c807392ff18c1dac0dd0b2c99f0a7974"
+    },
+    "AGG": {
+      "rows": 5366,
       "start": "2005-01-03",
       "end": "2026-05-01",
-      "sha256": "e3fd7752c55c02880afc523b3232f568eff2b4a8366fcd015dcd126285dcee54"
+      "sha256": "e6e00c6ac6938e0a94cee35d7f2772f724edb8ba22cf2f9f5ee7af824c98ae48"
     },
     "BWX": {
       "rows": 4667,
@@ -65,23 +41,77 @@
       "end": "2026-05-01",
       "sha256": "396c8ea6734dd2978ea766041899d62fab087a64629203b1f7b842b5ba558ebd"
     },
-    "EPI": {
-      "rows": 4574,
-      "start": "2008-02-26",
-      "end": "2026-05-01",
-      "sha256": "e89db05070c4f38a64d9a91b7b48ec5932e38ade93b73ab15c08ec419b998abb"
-    },
     "EMB": {
       "rows": 2196,
       "start": "2017-08-07",
       "end": "2026-05-01",
       "sha256": "bd8c0326a09149d600210932a56accb9ab75f77526fa342813e3791e7ed419e2"
     },
+    "EPI": {
+      "rows": 4574,
+      "start": "2008-02-26",
+      "end": "2026-05-01",
+      "sha256": "e89db05070c4f38a64d9a91b7b48ec5932e38ade93b73ab15c08ec419b998abb"
+    },
+    "EZU": {
+      "rows": 5364,
+      "start": "2005-01-03",
+      "end": "2026-05-01",
+      "sha256": "e3fd7752c55c02880afc523b3232f568eff2b4a8366fcd015dcd126285dcee54"
+    },
+    "GLD": {
+      "rows": 5399,
+      "start": "2005-01-03",
+      "end": "2026-06-18",
+      "sha256": "e6b31f68ca400c290c6ae3f184acd12605af765c51663d6a9c73b83af1cbf4ea"
+    },
+    "IEF": {
+      "rows": 5366,
+      "start": "2005-01-03",
+      "end": "2026-05-01",
+      "sha256": "63838de0627dd7e5374a448a7d3f5b57cc944e2c30fe9a0175b0b69bbed4f5c8"
+    },
+    "QQQ": {
+      "rows": 5366,
+      "start": "2005-01-03",
+      "end": "2026-05-01",
+      "sha256": "2f5272850994ea4bf017d0c33627092b5859ff36281cfdbce147a2e1fad45da1"
+    },
+    "SHV": {
+      "rows": 5399,
+      "start": "2005-01-03",
+      "end": "2026-06-18",
+      "sha256": "a5431c6d1c47682669cedf52fb572fc9914fb45c6e8268cae2142ded7bcad8f5"
+    },
+    "SMH": {
+      "rows": 5366,
+      "start": "2005-01-03",
+      "end": "2026-05-01",
+      "sha256": "7004e1dcebe910532d6b3c8fd6e3d1cd76ac8f3709589406a65947e31d00b356"
+    },
+    "SPY": {
+      "rows": 5399,
+      "start": "2005-01-03",
+      "end": "2026-06-18",
+      "sha256": "b1eb03abd7d0fef3189a98209e93f28f3b9d42b91519e13ee9d14f0932bf6acf"
+    },
+    "TLT": {
+      "rows": 5399,
+      "start": "2005-01-03",
+      "end": "2026-06-18",
+      "sha256": "cdc4093b77af06c92db2b6e1b3730c344c2a312e5b710858a5f21e3dffd76da9"
+    },
     "VT": {
       "rows": 4489,
       "start": "2008-06-26",
       "end": "2026-05-01",
       "sha256": "1d224ce3a6b66f3a2bc1400b0e694b955812baa534d052c3870bfcdd03da89dd"
+    },
+    "VTI": {
+      "rows": 5366,
+      "start": "2005-01-03",
+      "end": "2026-05-01",
+      "sha256": "106e0a68de0d55b5a717457fafb358cf7f16c0df6cfef803cf3ebb99f2f16139"
     }
   },
   "markets": {
@@ -96,7 +126,7 @@
       ],
       "start": "2005-01-03",
       "end": "2026-04-30",
-      "sha256": "5491cb4825bd7083ee542722c4cff0688afef1e1f9617461fb9d666c0bf2832e"
+      "sha256": "f2c80b48d605a59c5aa2e6c352679469779d31036598b5255ca8b47876a51410"
     },
     "cn": {
       "file": "D:/codeSpace/BreathofEarth/data/market_cn.csv",

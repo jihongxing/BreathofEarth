@@ -1094,17 +1094,9 @@ class DataManager:
         status = {
             "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "markets_updated": markets,
-            "tickers": {},
+            "tickers": self._raw_ticker_metadata(),
             "rate_limiter": self.rl.stats,
         }
-        for t, s in ticker_data.items():
-            raw_path = RAW_DIR / f"{t}.csv"
-            status["tickers"][t] = {
-                "rows": len(s),
-                "start": str(s.index.min().date()),
-                "end": str(s.index.max().date()),
-                "sha256": self._sha256(raw_path) if raw_path.exists() else None,
-            }
         with STATUS_FILE.open("w", encoding="utf-8") as f:
             json.dump(status, f, ensure_ascii=False, indent=2)
 
@@ -1123,17 +1115,9 @@ class DataManager:
             "generated_at_utc": datetime.now().isoformat(),
             "source": "data_manager_v2",
             "policy": {"backtest_mode": "local_only"},
-            "tickers": {},
+            "tickers": self._raw_ticker_metadata(),
             "markets": {},
         }
-        for t, s in ticker_data.items():
-            raw_path = RAW_DIR / f"{t}.csv"
-            payload["tickers"][t] = {
-                "rows": int(len(s)),
-                "start": str(s.index.min().date()),
-                "end": str(s.index.max().date()),
-                "sha256": self._sha256(raw_path) if raw_path.exists() else None,
-            }
         for m in markets:
             cfg = MARKET_CONFIGS[m]
             p = DATA_DIR / cfg["file"]
@@ -1150,6 +1134,22 @@ class DataManager:
         with manifest_path.open("w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
         logger.info(f"  ✓ data_manifest.json 已更新")
+
+    def _raw_ticker_metadata(self) -> dict[str, dict]:
+        """Return audit metadata for every tracked raw CSV cache."""
+        tickers: dict[str, dict] = {}
+        for raw_path in sorted(RAW_DIR.glob("*.csv")):
+            ticker = raw_path.stem
+            series = self._load_raw(raw_path, ticker)
+            if series is None or series.empty:
+                raise RuntimeError(f"raw cache {raw_path.name} cannot be audited")
+            tickers[ticker] = {
+                "rows": int(len(series)),
+                "start": str(series.index.min().date()),
+                "end": str(series.index.max().date()),
+                "sha256": self._sha256(raw_path),
+            }
+        return tickers
 
 
 # ── CLI 入口 ──────────────────────────────────────────
