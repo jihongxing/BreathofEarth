@@ -9,6 +9,28 @@
 
 当前项目状态：`Research PASS / Production design APPROVED / Live leveraged execution NOT YET APPROVED`
 
+## 招牌指标
+
+当前主线不是单纯的经典永续投资组合，而是：
+
+`90% 防御核心 + 10% 现代贝塔卫星`
+
+也就是 `SPY / TLT / GLD / SHV` 的防御底座，叠加小比例 `QQQ / SPY / GLD` 卫星。Stage 9.5 不是策略本身，而是只读影子观察和风控治理层。
+
+| 口径 | CAGR | MDD | 定位 |
+| --- | ---: | ---: | --- |
+| `research_current` | `7.60%` | `-13.95%` | 纸面最高研究净值口径，不含真实税务和券商账单 |
+| `calibrated_base_case` | `7.03%` | `-14.56%` | 当前最值得参考的真实摩擦校准研究口径 |
+| `calibrated_harsh_case` | `6.60%` | `-15.10%` | 校准摩擦下的保守压力口径 |
+| 固定防御核心 | `6.27%` | `-11.29%` | 收益不是最高，但回撤最浅，是系统防守锚 |
+
+所以，当前最优解要分两层读：
+
+- 如果问“纸面最高 CAGR / MDD”，答案是 `research_current = 7.60% / -13.95%`。
+- 如果问“更接近真实世界、可作为当前主线参考的最优口径”，答案是 `calibrated_base_case = 7.03% / -14.56%`。
+
+`calibrated_base_case` 仍然是研究估算，不是 IBKR 对账单，不是税务意见，不是实盘可得收益，也不代表实盘杠杆获批。当前最终判定仍是：`Research PASS / Production design APPROVED / Live leveraged execution NOT YET APPROVED`。
+
 已经落地：
 
 - `Core / Stability / Alpha` 边界进一步收紧，Alpha 独立账本运行
