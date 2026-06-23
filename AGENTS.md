@@ -14,6 +14,7 @@ Before changing strategy, broker execution, live observation, or frontend dashbo
 - `README.md`
 - `docs/09-实盘路线图.md`
 - `docs/13-券商接入主备与沙箱实施方案.md`
+- `docs/23-多策略影子审计平台设计.md`
 
 Current project verdict:
 
@@ -34,6 +35,8 @@ The current production candidate is:
 Any change to weights, tickers, MA windows, recovery rules, slippage assumptions, or satellite size must start as a bypass audit under `backtest/`, with tests, before touching production code.
 
 Do not add `SMH`, raise the satellite above 10%, or loosen risk thresholds unless a new audit explicitly proves the change and updates `docs/15-生产候选方案与后续开发指南.md`.
+
+Multi-strategy shadow observation is an audit platform, not a strategy store or trading cockpit. Follow `docs/23-多策略影子审计平台设计.md`; the first implementation step must be `engine/strategy_registry.py` plus schema tests before adding runners, APIs, or frontend panels.
 
 ## Data Boundary
 
