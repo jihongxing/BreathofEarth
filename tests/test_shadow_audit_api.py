@@ -77,9 +77,12 @@ def test_build_shadow_audit_payload_reports_missing_files(tmp_path):
 
     assert payload["status"] == "MISSING"
     assert payload["level"] == "missing"
-    assert payload["requires_attention"] is False
+    assert payload["requires_attention"] is True
     assert payload["components"]["shadow_sync"]["status"] == "missing"
+    assert payload["components"]["shadow_sync"]["requires_attention"] is True
     assert payload["components"]["margin_snapshot"]["status"] == "missing"
+    assert payload["components"]["margin_snapshot"]["requires_attention"] is True
+    assert payload["live_leverage_approved"] is False
 
 
 def test_shadow_audit_api_requires_login_and_returns_readonly_payload(monkeypatch, tmp_path):
@@ -256,8 +259,9 @@ def test_build_observation_summary_payload_reports_missing_file(tmp_path):
 
     assert payload["status"] == "missing"
     assert payload["level"] == "missing"
-    assert payload["requires_attention"] is False
+    assert payload["requires_attention"] is True
     assert payload["live_leverage_approved"] is False
+    assert payload["summary"]["requires_attention"] is True
     assert payload["summary"]["source_path"].endswith("latest_stage95_observation_summary.json")
 
 
