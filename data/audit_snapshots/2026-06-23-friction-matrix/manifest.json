@@ -1,0 +1,42 @@
+{
+  "snapshot": "2026-06-23-friction-matrix",
+  "source": "research assumptions from historical rate regimes, not account statements",
+  "created_at": "2026-06-23",
+  "policy": {
+    "purpose": "calibrated friction matrix bypass audit input",
+    "routine_refresh_allowed": false,
+    "production_candidate_change": false,
+    "live_tax_or_broker_statement": false
+  },
+  "scenario_sources": {
+    "fed_funds_rate": "annual regime approximations from public historical rate environments; not a broker ledger",
+    "dividend_yield": "rough annual SPY/QQQ exposure assumptions for withholding stress only",
+    "withholding_tax_rate": "generic 30% non-resident withholding stress assumption; not entity-specific tax advice",
+    "broker_spread_bps": "research estimate of cash/broker spread applied only to SHV exposure",
+    "event_bps": "research estimate applied only to estimated turnover on state-machine action dates"
+  },
+  "sensitivity_boundary": {
+    "base_case": "intended to test whether flat 120bp annual drag over-penalizes the research NAV",
+    "harsh_case": "multipliers are applied in code to tax, broker, operational, and event drag",
+    "not_covered": [
+      "actual IBKR daily interest ledger",
+      "actual dividend withholding records",
+      "tax lots and realized capital gains",
+      "entity-specific offshore tax treatment",
+      "live order book impact",
+      "broker house-margin rule changes"
+    ]
+  },
+  "failure_boundary": {
+    "margin_rate_above_8_percent": "matrix must be replaced or a severe scenario added before using the calibration as a reference",
+    "punitive_or_changed_withholding_tax": "matrix invalid for that entity until tax counsel and actual withholding records are incorporated",
+    "broker_margin_or_cash_interest_rule_change": "matrix invalid until broker statements confirm the new economics",
+    "stage95_missing_or_unavailable": "calibrated result cannot be used for production decisions",
+    "live_execution_gate_enabled": "backtest.cagr_uplift_audit must fail closed and refuse to run"
+  },
+  "files": {
+    "annual_friction_matrix.json": {
+      "sha256": "558ca15df71702485a26ff2411a09df5cfbd6f1d36f335594d47ed9b7474d912"
+    }
+  }
+}

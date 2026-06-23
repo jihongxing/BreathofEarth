@@ -9,6 +9,28 @@
 
 当前项目状态：`Research PASS / Production design APPROVED / Live leveraged execution NOT YET APPROVED`
 
+## 招牌指标
+
+当前主线不是单纯的经典永续投资组合，而是：
+
+`90% 防御核心 + 10% 现代贝塔卫星`
+
+也就是 `SPY / TLT / GLD / SHV` 的防御底座，叠加小比例 `QQQ / SPY / GLD` 卫星。Stage 9.5 不是策略本身，而是只读影子观察和风控治理层。
+
+| 口径 | CAGR | MDD | 定位 |
+| --- | ---: | ---: | --- |
+| `research_current` | `7.60%` | `-13.95%` | 纸面最高研究净值口径，不含真实税务和券商账单 |
+| `calibrated_base_case` | `7.03%` | `-14.56%` | 当前最值得参考的真实摩擦校准研究口径 |
+| `calibrated_harsh_case` | `6.60%` | `-15.10%` | 校准摩擦下的保守压力口径 |
+| 固定防御核心 | `6.27%` | `-11.29%` | 收益不是最高，但回撤最浅，是系统防守锚 |
+
+所以，当前最优解要分两层读：
+
+- 如果问“纸面最高 CAGR / MDD”，答案是 `research_current = 7.60% / -13.95%`。
+- 如果问“更接近真实世界、可作为当前主线参考的最优口径”，答案是 `calibrated_base_case = 7.03% / -14.56%`。
+
+`calibrated_base_case` 仍然是研究估算，不是 IBKR 对账单，不是税务意见，不是实盘可得收益，也不代表实盘杠杆获批。当前最终判定仍是：`Research PASS / Production design APPROVED / Live leveraged execution NOT YET APPROVED`。
+
 已经落地：
 
 - `Core / Stability / Alpha` 边界进一步收紧，Alpha 独立账本运行
@@ -106,12 +128,21 @@ flowchart TD
 
 这说明当前 90/10 候选更适合定义为防御底座，而不是已经满足高净后收益目标的完整实盘系统。细节见 [真实摩擦压力审计](D:/codeSpace/BreathofEarth/docs/20-%E7%9C%9F%E5%AE%9E%E6%91%A9%E6%93%A6%E5%8E%8B%E5%8A%9B%E5%AE%A1%E8%AE%A1.md)。
 
+校准摩擦矩阵研究口径：
+
+- `calibrated_base_case`：约 `CAGR 7.03% / MDD -14.56%`
+- `calibrated_harsh_case`：约 `CAGR 6.60% / MDD -15.10%`
+
+该校准只用于检验静态年化拖累是否过度扣罚，属于年度假设矩阵下的研究估算。它不是 IBKR 真实对账单，不是税务意见，不是实盘可得收益，也不改变 `Live leveraged execution NOT YET APPROVED`。
+
 Benchmark 对比必须使用双口径：
 
 - 研究口径：`research_current`
 - 真实摩擦基础口径：`unlevered_base_case`
 
 当前结论是：真实摩擦口径下，候选系统收益低于 `VBIAX / PRPFX`，但最大回撤显著更浅；在 `RPAR` 的较短历史窗口内，收益与回撤均占优。细节见 [Benchmark 对比审计](D:/codeSpace/BreathofEarth/docs/21-Benchmark%E5%AF%B9%E6%AF%94%E5%AE%A1%E8%AE%A1.md)。
+
+后续若研究如何把真实摩擦口径 CAGR 推向 `7% - 8%`，必须先按 [CAGR 提升研究计划](D:/codeSpace/BreathofEarth/docs/22-CAGR%E6%8F%90%E5%8D%87%E7%A0%94%E7%A9%B6%E8%AE%A1%E5%88%92.md) 走旁路审计。该研究不得直接修改生产候选、不得提高 10% 卫星上限、不得把 Stage 9.5 改成交易执行层。
 
 数据文件治理：
 
@@ -279,6 +310,7 @@ BreathofEarth/
 - [IBKR 只读接入清单](D:/codeSpace/BreathofEarth/docs/19-IBKR%E5%8F%AA%E8%AF%BB%E6%8E%A5%E5%85%A5%E6%B8%85%E5%8D%95.md)
 - [真实摩擦压力审计](D:/codeSpace/BreathofEarth/docs/20-%E7%9C%9F%E5%AE%9E%E6%91%A9%E6%93%A6%E5%8E%8B%E5%8A%9B%E5%AE%A1%E8%AE%A1.md)
 - [Benchmark 对比审计](D:/codeSpace/BreathofEarth/docs/21-Benchmark%E5%AF%B9%E6%AF%94%E5%AE%A1%E8%AE%A1.md)
+- [CAGR 提升研究计划](D:/codeSpace/BreathofEarth/docs/22-CAGR%E6%8F%90%E5%8D%87%E7%A0%94%E7%A9%B6%E8%AE%A1%E5%88%92.md)
 
 ## 一句话总结
 
