@@ -17,9 +17,9 @@
 - `IBKR / Futu / Paper` 三类适配器骨架已具备
 - `BrokerExecutor` 已接入最小真实执行骨架
 - 真实执行审计流水已落库：`broker_execution_events`
-- 首页与只读观察面板已能查看 `Core / Broker Sync / Shadow Run`
+- 首页与只读观察面板已能查看 `Core / Broker Sync / Shadow Run / Stage 9.5`
 - 已完成干净数据口径下的 90/10 生产候选审计：`90% 防御核心 + 10% 现代贝塔卫星`
-- 已新增 Stage 9.5 影子观察脚本：`live.stage95_shadow_runner`，内部串联 `live.shadow_sync` 与 `live.margin_monitor`
+- 已新增 Stage 9.5 影子观察链路：`live.stage95_shadow_runner` 串联 `live.shadow_sync` 与 `live.margin_monitor`，只读 API 与前端面板已接入
 
 明确不做或暂不推进：
 
@@ -88,6 +88,8 @@ python -m live.stage95_observation_summary --shadow-dir data/shadow --expected-c
 ```
 
 第一条命令会写出 `latest_shadow_sync.json`、`latest_margin_snapshot.json` 与 `latest_stage95_cycle.json`。第二条命令会生成 `latest_stage95_observation_summary.json`，汇总 60 日观察覆盖率、券商不可用次数、滑点和保证金字段覆盖率。`margin_monitor` 在券商不可达或保证金字段缺失时必须返回 `UNAVAILABLE`，不能推导安全结论。
+
+Stage 9.5 的 FastAPI 只读接口与前端面板已经接入。缺失、过期、不可解析、券商不可达或保证金字段缺失的报告必须显示为需要关注，不能被渲染成安全状态。该面板不提供交易、加杠杆或 Shadow 转 Live 的入口。
 
 ## 运行边界
 

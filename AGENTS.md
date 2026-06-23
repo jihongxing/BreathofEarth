@@ -121,7 +121,7 @@ The final response should include:
 The recommendation must be specific enough to start work immediately, for example:
 
 - "Next: expose `latest_shadow_sync.json` and `latest_margin_snapshot.json` through a read-only FastAPI endpoint."
-- "Next: add a Stage 9.5 read-only panel to `frontend/app.js` after the API is in place."
+- "Next: write `docs/16-Stage9.5影子观察运行手册.md` with daily commands, abnormal-state handling, and 60-trading-day acceptance criteria."
 - "Next: run 60 trading days of shadow sync before discussing live leverage."
 
 Do not end with a vague "let me know what you want next" when the project state clearly implies a good next step.
