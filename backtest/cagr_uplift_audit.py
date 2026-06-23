@@ -1,0 +1,498 @@
+"""
+CAGR uplift bypass audit.
+
+This first experiment tests cash-proxy replacement only. It keeps the audited
+90/10 topology, MA150 macro filter, acute shifter, recovery rules, and
+satellite size unchanged. The only variable is the price series used when the
+defensive core holds the SHV cash sleeve.
+
+Short-history cash proxies are compared only on their own overlapping windows.
+Do not read a SGOV/USFR result as a 2005 full-cycle conclusion.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import date
+import hashlib
+import json
+from pathlib import Path
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
+
+import pandas as pd
+
+from backtest.fixed_policy_audit import load_prices
+from backtest.portfolio_aggregation_audit import (
+    INITIAL_CAPITAL,
+    SleeveMetrics,
+    run_static_beta_sleeve,
+)
+from backtest.real_world_friction_audit import (
+    PRODUCTION_BETA_SCENARIO,
+    PRODUCTION_BETA_WEIGHTS,
+    PRODUCTION_SLEEVE_WEIGHTS,
+    RealWorldFrictionScenario,
+    apply_real_world_friction,
+)
+from backtest.return_attribution import (
+    AttributionAudit,
+    run_return_attribution,
+    run_return_attribution_from_prices,
+)
+from engine.config import ASSETS
+from engine.portfolio_aggregator import AggregatedPortfolio, aggregate_sleeves, calculate_cagr, calculate_mdd
+
+
+DATA_DIR = Path("data")
+RAW_DIR = DATA_DIR / "raw"
+CASH_PROXY_SNAPSHOT_DIR = DATA_DIR / "audit_snapshots" / "2026-06-23-cash-proxy"
+DEFAULT_START = "2005-01-03"
+DEFAULT_END = "2026-04-30"
+CASH_PROXY_TICKERS = ["SHV", "BIL", "SGOV", "USFR", "TFLO"]
+BASE_REAL_WORLD_SCENARIO = RealWorldFrictionScenario(
+    name="unlevered_base_case",
+    dividend_withholding_drag_bps=55,
+    tax_drag_bps=35,
+    broker_cash_financing_drag_bps=10,
+    operational_failure_drag_bps=20,
+    tail_failure_shock_bps=50,
+)
+HARSH_REAL_WORLD_SCENARIO = RealWorldFrictionScenario(
+    name="unlevered_harsh_case",
+    dividend_withholding_drag_bps=75,
+    tax_drag_bps=75,
+    broker_cash_financing_drag_bps=25,
+    operational_failure_drag_bps=50,
+    tail_failure_shock_bps=150,
+)
+
+
+@dataclass(frozen=True)
+class CashProxyDefensiveRun:
+    ticker: str
+    attribution: AttributionAudit
+    source: str
+
+
+@dataclass(frozen=True)
+class CashProxyAuditRow:
+    ticker: str
+    source: str
+    start: str
+    end: str
+    years: float
+    research_cagr: float
+    research_mdd: float
+    real_cagr: float
+    real_mdd: float
+    harsh_cagr: float
+    harsh_mdd: float
+    baseline_real_cagr: float
+    baseline_real_mdd: float
+    real_cagr_delta: float
+    real_mdd_delta: float
+    final_nav_delta: float
+    defensive_cagr: float
+    defensive_mdd: float
+    cash_pnl_delta: float
+    macro_net_pnl_delta: float
+    avg_cash_weight: float
+    high_cash_day_pct: float
+    max_daily_weight_shock: float
+    pass_mdd_guardrail: bool
+
+
+def _validate_positive(series: pd.Series, ticker: str, source: Path | str) -> pd.Series:
+    clean = pd.to_numeric(series, errors="coerce").dropna().sort_index()
+    if clean.empty:
+        raise ValueError(f"empty price series for {ticker}: {source}")
+    bad = clean[clean <= 0]
+    if not bad.empty:
+        samples = ", ".join(
+            f"{idx.date()}={value:.4f}" for idx, value in bad.head(5).items()
+        )
+        raise ValueError(f"non-positive prices for {ticker} in {source}: {samples}")
+    clean.name = ticker
+    clean.index.name = "date"
+    return clean
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def load_cached_cash_proxy(
+    ticker: str,
+    snapshot_dir: Path = CASH_PROXY_SNAPSHOT_DIR,
+) -> tuple[pd.Series, str]:
+    raw_path = RAW_DIR / f"{ticker}.csv"
+    if raw_path.exists():
+        df = pd.read_csv(raw_path, index_col="date", parse_dates=True).sort_index()
+        column = "adj_close" if "adj_close" in df.columns else df.columns[0]
+        return _validate_positive(df[column], ticker, raw_path), str(raw_path)
+
+    snapshot_path = snapshot_dir / f"{ticker}.csv"
+    if snapshot_path.exists():
+        df = pd.read_csv(snapshot_path, index_col="date", parse_dates=True).sort_index()
+        column = "adj_close" if "adj_close" in df.columns else df.columns[0]
+        return _validate_positive(df[column], ticker, snapshot_path), str(snapshot_path)
+
+    raise FileNotFoundError(f"missing cash proxy data for {ticker}")
+
+
+def _parse_yahoo_chart_payload(ticker: str, payload: dict) -> pd.Series:
+    chart = payload.get("chart") if isinstance(payload, dict) else None
+    result = chart.get("result") if isinstance(chart, dict) else None
+    if not result:
+        error = chart.get("error") if isinstance(chart, dict) else None
+        raise RuntimeError(f"Yahoo chart returned no result for {ticker}: {error}")
+    item = result[0]
+    timestamps = item.get("timestamp") or []
+    adjclose = (item.get("indicators") or {}).get("adjclose") or []
+    if not timestamps or not adjclose:
+        raise RuntimeError(f"Yahoo chart returned no adjusted close for {ticker}")
+    values = adjclose[0].get("adjclose") if isinstance(adjclose[0], dict) else None
+    if not values:
+        raise RuntimeError(f"Yahoo chart adjusted close is empty for {ticker}")
+    index = pd.to_datetime(timestamps, unit="s").normalize()
+    series = pd.Series(values, index=index, name=ticker)
+    return _validate_positive(series, ticker, f"yahoo_chart:{ticker}")
+
+
+def download_cash_proxy_yahoo_chart(
+    ticker: str,
+    start: str = DEFAULT_START,
+    end: str = DEFAULT_END,
+) -> pd.Series:
+    period1 = int(pd.Timestamp(start).timestamp())
+    period2 = int((pd.Timestamp(end) + pd.Timedelta(days=1)).timestamp())
+    query = urlencode(
+        {
+            "period1": period1,
+            "period2": period2,
+            "interval": "1d",
+            "events": "history",
+            "includeAdjustedClose": "true",
+        }
+    )
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?{query}"
+    request = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urlopen(request, timeout=30) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    return _parse_yahoo_chart_payload(ticker, payload)
+
+
+def download_cash_proxy(ticker: str, start: str = DEFAULT_START, end: str = DEFAULT_END) -> pd.Series:
+    try:
+        return download_cash_proxy_yahoo_chart(ticker, start=start, end=end)
+    except Exception:
+        pass
+
+    import yfinance as yf
+
+    df = yf.download(ticker, start=start, end=end, auto_adjust=False, progress=False, threads=False)
+    if df.empty:
+        raise RuntimeError(f"cash proxy download returned empty data for {ticker}")
+    if isinstance(df.columns, pd.MultiIndex):
+        series = df["Adj Close"]
+        if isinstance(series, pd.DataFrame):
+            series = series.iloc[:, 0]
+    else:
+        series = df["Adj Close"]
+    return _validate_positive(series, ticker, f"yfinance:{ticker}")
+
+
+def save_cash_proxy_snapshot(
+    series: pd.Series,
+    snapshot_dir: Path = CASH_PROXY_SNAPSHOT_DIR,
+) -> Path:
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+    path = snapshot_dir / f"{series.name}.csv"
+    frame = series.to_frame("adj_close")
+    frame.index.name = "date"
+    frame.to_csv(path)
+    write_cash_proxy_manifest(snapshot_dir)
+    return path
+
+
+def write_cash_proxy_manifest(snapshot_dir: Path = CASH_PROXY_SNAPSHOT_DIR) -> Path:
+    tickers: dict[str, dict] = {}
+    for path in sorted(snapshot_dir.glob("*.csv")):
+        df = pd.read_csv(path, index_col="date", parse_dates=True).sort_index()
+        column = "adj_close" if "adj_close" in df.columns else df.columns[0]
+        series = _validate_positive(df[column], path.stem, path)
+        tickers[path.stem] = {
+            "rows": int(len(series)),
+            "start": str(series.index.min().date()),
+            "end": str(series.index.max().date()),
+            "sha256": _sha256(path),
+        }
+    payload = {
+        "snapshot": snapshot_dir.name,
+        "source": "Yahoo Adj Close",
+        "created_at": date.today().isoformat(),
+        "policy": {
+            "purpose": "cash proxy CAGR uplift bypass audit input",
+            "routine_refresh_allowed": False,
+            "production_candidate_change": False,
+        },
+        "tickers": tickers,
+    }
+    manifest_path = snapshot_dir / "manifest.json"
+    manifest_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    return manifest_path
+
+
+def load_or_fetch_cash_proxy(
+    ticker: str,
+    allow_download: bool = True,
+    snapshot_dir: Path = CASH_PROXY_SNAPSHOT_DIR,
+) -> tuple[pd.Series, str]:
+    if ticker == "SHV":
+        prices = load_prices()
+        return _validate_positive(prices["SHV"], "SHV", "data/etf_daily.csv"), "data/etf_daily.csv"
+    try:
+        return load_cached_cash_proxy(ticker, snapshot_dir=snapshot_dir)
+    except FileNotFoundError:
+        if not allow_download:
+            raise
+    series = download_cash_proxy(ticker)
+    path = save_cash_proxy_snapshot(series, snapshot_dir=snapshot_dir)
+    return series, str(path)
+
+
+def build_cash_proxy_prices(cash_proxy: pd.Series) -> pd.DataFrame:
+    prices = load_prices()[ASSETS].sort_index()
+    proxy = _validate_positive(cash_proxy, cash_proxy.name or "cash_proxy", "cash_proxy")
+    frame = prices.drop(columns=["SHV"]).join(proxy.rename("SHV"), how="inner")
+    frame = frame[ASSETS].sort_index().ffill().dropna(how="any")
+    frame = frame.loc[:DEFAULT_END]
+    if frame.empty:
+        raise ValueError(f"cash proxy {proxy.name} has no overlap with production assets")
+    return frame
+
+
+def _sleeve_from_attribution(name: str, audit: AttributionAudit) -> SleeveMetrics:
+    nav = audit.history["nav_end"].rename(name)
+    metrics = audit.metrics
+    return SleeveMetrics(
+        name=name,
+        nav=nav,
+        cagr=float(metrics.cagr),
+        mdd=float(metrics.mdd),
+        final=float(metrics.final),
+        total_cost=float(metrics.total_cost),
+        rebalances=int(metrics.rebalances),
+    )
+
+
+def run_defensive_cash_proxy(
+    ticker: str,
+    allow_download: bool = True,
+    snapshot_dir: Path = CASH_PROXY_SNAPSHOT_DIR,
+) -> CashProxyDefensiveRun:
+    if ticker == "SHV":
+        return CashProxyDefensiveRun(
+            ticker=ticker,
+            attribution=run_return_attribution(),
+            source="data/etf_daily.csv",
+        )
+    series, source = load_or_fetch_cash_proxy(
+        ticker,
+        allow_download=allow_download,
+        snapshot_dir=snapshot_dir,
+    )
+    prices = build_cash_proxy_prices(series)
+    return CashProxyDefensiveRun(
+        ticker=ticker,
+        attribution=run_return_attribution_from_prices(prices),
+        source=source,
+    )
+
+
+def build_research_nav_from_defensive(audit: AttributionAudit, name: str) -> AggregatedPortfolio:
+    defensive = _sleeve_from_attribution(f"defensive_{name}", audit)
+    beta = run_static_beta_sleeve(PRODUCTION_BETA_SCENARIO, PRODUCTION_BETA_WEIGHTS)
+    return aggregate_sleeves(
+        {"defensive": defensive.nav, "beta": beta.nav},
+        PRODUCTION_SLEEVE_WEIGHTS,
+        initial_capital=INITIAL_CAPITAL,
+    )
+
+
+def _slice_nav(nav: pd.Series, start: pd.Timestamp, end: pd.Timestamp) -> pd.Series:
+    sliced = nav.sort_index().loc[start:end].dropna()
+    if sliced.empty:
+        raise ValueError(f"NAV has no overlap for {start.date()}..{end.date()}")
+    return sliced
+
+
+def _years(index: pd.Index) -> float:
+    return max((index[-1] - index[0]).days / 365.25, 1 / 365.25)
+
+
+def _macro_net_pnl(audit: AttributionAudit, start: pd.Timestamp, end: pd.Timestamp) -> float:
+    history = audit.history.loc[start:end]
+    group = history[history["return_regime"] == "MACRO_DEFENSE"]
+    if group.empty:
+        return 0.0
+    return float(group["asset_pnl_total"].sum() - group["cost"].sum())
+
+
+def _cash_pnl(audit: AttributionAudit, start: pd.Timestamp, end: pd.Timestamp) -> float:
+    return float(audit.history.loc[start:end, "SHV_pnl"].sum())
+
+
+def _avg_cash_weight(audit: AttributionAudit, start: pd.Timestamp, end: pd.Timestamp) -> float:
+    return float(audit.history.loc[start:end, "SHV_start_weight"].mean())
+
+
+def _high_cash_day_pct(audit: AttributionAudit, start: pd.Timestamp, end: pd.Timestamp) -> float:
+    history = audit.history.loc[start:end]
+    if history.empty:
+        return 0.0
+    return float((history["SHV_end_weight"] >= 0.50).mean())
+
+
+def _max_daily_weight_shock(audit: AttributionAudit, start: pd.Timestamp, end: pd.Timestamp) -> float:
+    cols = [f"{asset}_end_weight" for asset in ASSETS]
+    weights = audit.history.loc[start:end, cols].dropna()
+    if len(weights) <= 1:
+        return 0.0
+    return float(weights.diff().abs().sum(axis=1).max() / 2.0)
+
+
+def run_baseline_defensive_for_window(start: pd.Timestamp, end: pd.Timestamp) -> AttributionAudit:
+    """Replay SHV baseline from the same start date and initial capital as a proxy."""
+    prices = load_prices()[ASSETS].sort_index().loc[start:end]
+    if prices.empty:
+        raise ValueError(f"baseline prices have no overlap for {start.date()}..{end.date()}")
+    return run_return_attribution_from_prices(prices)
+
+
+def evaluate_cash_proxy(
+    defensive_run: CashProxyDefensiveRun,
+) -> CashProxyAuditRow:
+    proxy_nav = defensive_run.attribution.history["nav_end"]
+    proxy_start = proxy_nav.index.min()
+    proxy_end = proxy_nav.index.max()
+    baseline_defensive = run_baseline_defensive_for_window(proxy_start, proxy_end)
+    baseline_research = build_research_nav_from_defensive(
+        baseline_defensive,
+        f"baseline_{defensive_run.ticker}",
+    )
+    research = build_research_nav_from_defensive(defensive_run.attribution, defensive_run.ticker)
+    start = max(research.nav.index.min(), baseline_research.nav.index.min())
+    end = min(research.nav.index.max(), baseline_research.nav.index.max())
+
+    research_slice = _slice_nav(research.nav, start, end)
+    baseline_research_slice = _slice_nav(baseline_research.nav, start, end)
+    real_nav = apply_real_world_friction(research_slice, BASE_REAL_WORLD_SCENARIO)
+    harsh_nav = apply_real_world_friction(research_slice, HARSH_REAL_WORLD_SCENARIO)
+    baseline_real_nav = apply_real_world_friction(
+        baseline_research_slice,
+        BASE_REAL_WORLD_SCENARIO,
+    )
+
+    real_cagr = calculate_cagr(real_nav)
+    real_mdd = calculate_mdd(real_nav)
+    baseline_real_cagr = calculate_cagr(baseline_real_nav)
+    baseline_real_mdd = calculate_mdd(baseline_real_nav)
+    defensive_nav = defensive_run.attribution.history["nav_end"].loc[start:end]
+    baseline_cash_pnl = _cash_pnl(baseline_defensive, start, end)
+    cash_pnl = _cash_pnl(defensive_run.attribution, start, end)
+    baseline_macro = _macro_net_pnl(baseline_defensive, start, end)
+    macro = _macro_net_pnl(defensive_run.attribution, start, end)
+
+    return CashProxyAuditRow(
+        ticker=defensive_run.ticker,
+        source=defensive_run.source,
+        start=start.strftime("%Y-%m-%d"),
+        end=end.strftime("%Y-%m-%d"),
+        years=_years(research_slice.index),
+        research_cagr=calculate_cagr(research_slice),
+        research_mdd=calculate_mdd(research_slice),
+        real_cagr=real_cagr,
+        real_mdd=real_mdd,
+        harsh_cagr=calculate_cagr(harsh_nav),
+        harsh_mdd=calculate_mdd(harsh_nav),
+        baseline_real_cagr=baseline_real_cagr,
+        baseline_real_mdd=baseline_real_mdd,
+        real_cagr_delta=real_cagr - baseline_real_cagr,
+        real_mdd_delta=real_mdd - baseline_real_mdd,
+        final_nav_delta=float(real_nav.iloc[-1] - baseline_real_nav.iloc[-1]),
+        defensive_cagr=calculate_cagr(defensive_nav),
+        defensive_mdd=calculate_mdd(defensive_nav),
+        cash_pnl_delta=cash_pnl - baseline_cash_pnl,
+        macro_net_pnl_delta=macro - baseline_macro,
+        avg_cash_weight=_avg_cash_weight(defensive_run.attribution, start, end),
+        high_cash_day_pct=_high_cash_day_pct(defensive_run.attribution, start, end),
+        max_daily_weight_shock=_max_daily_weight_shock(defensive_run.attribution, start, end),
+        pass_mdd_guardrail=(real_mdd >= baseline_real_mdd and calculate_mdd(harsh_nav) >= -0.17),
+    )
+
+
+def run_cash_proxy_uplift_audit(
+    tickers: list[str] | None = None,
+    allow_download: bool = True,
+    snapshot_dir: Path = CASH_PROXY_SNAPSHOT_DIR,
+) -> list[CashProxyAuditRow]:
+    rows: list[CashProxyAuditRow] = []
+    for ticker in tickers or CASH_PROXY_TICKERS:
+        defensive_run = run_defensive_cash_proxy(
+            ticker,
+            allow_download=allow_download,
+            snapshot_dir=snapshot_dir,
+        )
+        rows.append(
+            evaluate_cash_proxy(defensive_run)
+        )
+    return rows
+
+
+def print_report(rows: list[CashProxyAuditRow]) -> None:
+    print("=" * 172)
+    print("  CAGR Uplift Audit: Cash Proxy Replacement Only")
+    print("=" * 172)
+    print(
+        "  Boundary: 90/10 topology, MA150, 8w recovery, satellite size, and "
+        "real-world friction model are unchanged."
+    )
+    print("  Short-history proxies are compared only against same-window SHV baselines.")
+    print("-" * 172)
+    print(
+        f"  {'Proxy':<6} {'Window':<23} {'Years':>5} "
+        f"{'Real CAGR':>10} {'Real MDD':>9} {'Base CAGR':>10} {'Base MDD':>9} "
+        f"{'CAGR Δ':>8} {'MDD Δ':>8} {'Final Δ':>11} {'Cash PnL Δ':>12} "
+        f"{'Macro Δ':>11} {'High Cash':>10} {'Verdict':>9}"
+    )
+    for row in rows:
+        verdict = "PASS" if row.pass_mdd_guardrail and row.real_cagr_delta > 0 else "WATCH"
+        print(
+            f"  {row.ticker:<6} {row.start}..{row.end:<10} {row.years:>5.1f} "
+            f"{row.real_cagr:>9.2%} {row.real_mdd:>8.2%} "
+            f"{row.baseline_real_cagr:>9.2%} {row.baseline_real_mdd:>8.2%} "
+            f"{row.real_cagr_delta:>7.2%} {row.real_mdd_delta:>7.2%} "
+            f"{row.final_nav_delta:>11,.2f} {row.cash_pnl_delta:>12,.2f} "
+            f"{row.macro_net_pnl_delta:>11,.2f} {row.high_cash_day_pct:>9.2%} {verdict:>9}"
+        )
+    print("-" * 172)
+    print("  Guardrail:")
+    print("  - PASS requires same-window real-world MDD no worse than SHV baseline and harsh MDD >= -17%.")
+    print("  - A higher short-window CAGR is not production approval.")
+    print("  - Stage 9.5 remains read-only; this audit does not change live execution status.")
+    print("=" * 172)
+
+
+def main() -> None:
+    rows = run_cash_proxy_uplift_audit()
+    print_report(rows)
+
+
+if __name__ == "__main__":
+    main()

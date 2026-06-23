@@ -1,0 +1,36 @@
+{
+  "snapshot": "2026-06-23-cash-proxy",
+  "source": "Yahoo Adj Close",
+  "created_at": "2026-06-23",
+  "policy": {
+    "purpose": "cash proxy CAGR uplift bypass audit input",
+    "routine_refresh_allowed": false,
+    "production_candidate_change": false
+  },
+  "tickers": {
+    "BIL": {
+      "rows": 4761,
+      "start": "2007-05-30",
+      "end": "2026-04-30",
+      "sha256": "dd288c6e8ab689cec837dd87d784e611abc21c2cce6b82e6809f2a34778f77ea"
+    },
+    "SGOV": {
+      "rows": 1487,
+      "start": "2020-06-01",
+      "end": "2026-04-30",
+      "sha256": "066e131dd99b5b27417089347aaefa4f8151ccd0e212fe33cbbf223d1728f381"
+    },
+    "TFLO": {
+      "rows": 3078,
+      "start": "2014-02-04",
+      "end": "2026-04-30",
+      "sha256": "70c7a4d3391898821ec6712c2964c8a37c5a63c9c2291cbe0a542fadfd6b88ba"
+    },
+    "USFR": {
+      "rows": 3078,
+      "start": "2014-02-04",
+      "end": "2026-04-30",
+      "sha256": "9e35ce6219ff9759177970fbfb9359a4618ff0195db453f1c874448548b8fe35"
+    }
+  }
+}
