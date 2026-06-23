@@ -119,4 +119,3 @@ def test_shadow_sync_offline_fallback_writes_report_and_warns(tmp_path):
     assert report["shadow_orders"] == []
     assert "current positions unavailable" in " ".join(report["warnings"])
     assert (tmp_path / "shadow" / "latest_shadow_sync.json").exists()
-
