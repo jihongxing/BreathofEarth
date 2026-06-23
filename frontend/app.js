@@ -371,9 +371,13 @@ async function loadDashboard() {
     var stage95SummaryPromise = api("/api/stage95-observation-summary/" + currentPortfolio).catch(function(err) {
       return buildStage95SummaryErrorPayload(err);
     });
+    var stage95AdmissionPromise = api("/api/stage95-admission/" + currentPortfolio).catch(function(err) {
+      return buildStage95AdmissionErrorPayload(err);
+    });
     var d = await api("/api/dashboard/" + currentPortfolio + "?days=90");
     var shadowAudit = await shadowAuditPromise;
     var stage95Summary = await stage95SummaryPromise;
+    var stage95Admission = await stage95AdmissionPromise;
 
     document.getElementById("stat-nav").textContent = d.currency + formatNum(d.current_nav);
 
@@ -390,7 +394,7 @@ async function loadDashboard() {
     renderDrawdownChart(d.drawdown_series);
     renderRiskEvents(d.risk_events);
     renderObservationOverview(d.observation_overview, d.currency);
-    renderStage95ShadowAudit(shadowAudit, stage95Summary, d.currency);
+    renderStage95ShadowAudit(shadowAudit, stage95Summary, stage95Admission, d.currency);
     renderCoreObservationHistory(d.core_observation, d.currency);
     renderBrokerSync(d.broker_sync, d.currency, d.core_observation);
     renderShadowRun(d.shadow_run);
@@ -959,7 +963,24 @@ function buildStage95SummaryErrorPayload(err) {
   };
 }
 
-function renderStage95ShadowAudit(auditData, summaryData, currencySymbol) {
+function buildStage95AdmissionErrorPayload(err) {
+  return {
+    status: "NOT_APPROVED",
+    level: "warning",
+    requires_attention: true,
+    live_leverage_approved: false,
+    human_review_required: true,
+    readonly: true,
+    production_conclusion: "Research PASS / Production design APPROVED / Live leveraged execution NOT YET APPROVED",
+    blockers: [{
+      code: "stage95_admission_api_unavailable",
+      message: err && err.message ? err.message : t("stage95AdmissionApiUnavailable"),
+    }],
+    checks: [],
+  };
+}
+
+function renderStage95ShadowAudit(auditData, summaryData, admissionData, currencySymbol) {
   var el = document.getElementById("stage95-shadow-audit");
   if (!el) return;
 
@@ -1053,7 +1074,62 @@ function renderStage95ShadowAudit(auditData, summaryData, currencySymbol) {
           }).join("") + '</div>'
         : '') +
       renderStage95ObservationSummary(summaryData, summary) +
+      renderStage95AdmissionGate(admissionData) +
       '<div class="broker-sync-overall-note">' + esc(t("stage95ReadonlyHint")) + '</div>' +
+    '</div>';
+}
+
+function renderStage95AdmissionGate(admissionData) {
+  if (!admissionData) {
+    return '' +
+      '<div class="stage95-section stage95-admission level-missing">' +
+        '<div class="stage95-section-title">' + esc(t("stage95AdmissionTitle")) + '</div>' +
+        '<div class="stage95-empty">' + esc(t("stage95AdmissionMissing")) + '</div>' +
+      '</div>';
+  }
+
+  var blockers = (admissionData.blockers || []).slice(0, 4);
+  var checks = admissionData.checks || [];
+  var passed = checks.filter(function(item) { return item && item.passed === true; }).length;
+  var total = checks.length;
+  var status = admissionData.status || "NOT_APPROVED";
+  var level = admissionData.level || "warning";
+
+  return '' +
+    '<div class="stage95-section stage95-admission level-' + esc(level) + '">' +
+      '<div class="stage95-summary-head">' +
+        '<div>' +
+          '<div class="stage95-section-title">' + esc(t("stage95AdmissionTitle")) + '</div>' +
+          '<div class="stage95-summary-subtitle">' + esc(t("stage95AdmissionStatus")) + ': ' + esc(status) + '</div>' +
+        '</div>' +
+        '<span class="badge ' + brokerBadgeClass(level) + '">' + esc(
+          status === "READY_FOR_HUMAN_REVIEW" ? t("stage95ReadyForHumanReview") : t("stage95AdmissionNotApproved")
+        ) + '</span>' +
+      '</div>' +
+      '<div class="stage95-summary-grid">' +
+        '<div class="stage95-summary-metric">' +
+          '<span>' + esc(t("stage95AdmissionChecks")) + '</span>' +
+          '<strong>' + esc(String(passed) + '/' + String(total)) + '</strong>' +
+        '</div>' +
+        '<div class="stage95-summary-metric">' +
+          '<span>' + esc(t("stage95AdmissionBlockers")) + '</span>' +
+          '<strong>' + esc(String(blockers.length)) + '</strong>' +
+        '</div>' +
+        '<div class="stage95-summary-metric">' +
+          '<span>' + esc(t("stage95HumanReview")) + '</span>' +
+          '<strong>' + esc(admissionData.human_review_required === false ? t("stage95No") : t("stage95Yes")) + '</strong>' +
+        '</div>' +
+        '<div class="stage95-summary-metric">' +
+          '<span>' + esc(t("stage95LiveLeverage")) + '</span>' +
+          '<strong>' + esc(admissionData.live_leverage_approved === true ? t("stage95Approved") : t("stage95NotApproved")) + '</strong>' +
+        '</div>' +
+      '</div>' +
+      (blockers.length
+        ? '<div class="shadow-run-warnings stage95-warnings">' + blockers.map(function(item) {
+            return '<div class="shadow-run-warning">' + esc(item.code || "blocker") + ': ' + esc(item.message || "") + '</div>';
+          }).join("") + '</div>'
+        : '<div class="broker-sync-overall-note">' + esc(t("stage95AdmissionReadyHint")) + '</div>') +
+      '<div class="broker-sync-overall-note">' + esc(t("stage95AdmissionReadonlyHint")) + '</div>' +
     '</div>';
 }
 

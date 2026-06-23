@@ -25,6 +25,8 @@ LEVEL_RANK = {
     "critical": 4,
 }
 
+PRODUCTION_CONCLUSION = "Research PASS / Production design APPROVED / Live leveraged execution NOT YET APPROVED"
+
 
 def _utc_now_text() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -239,7 +241,7 @@ def build_shadow_audit_payload(
         "stale_after_hours": stale_after_hours,
         "stale_report_count": stale_report_count,
         "live_leverage_approved": False,
-        "production_conclusion": "Research PASS / Production design APPROVED / Live leveraged execution NOT YET APPROVED",
+        "production_conclusion": PRODUCTION_CONCLUSION,
         "components": {
             "shadow_sync": shadow_sync,
             "margin_snapshot": margin_snapshot,
@@ -312,7 +314,7 @@ def normalize_observation_summary(
         ),
         "recent_cycles": _safe_list(payload.get("recent_cycles")),
         "live_leverage_approved": False,
-        "production_conclusion": "Research PASS / Production design APPROVED / Live leveraged execution NOT YET APPROVED",
+        "production_conclusion": PRODUCTION_CONCLUSION,
         "report": payload,
     }
 
@@ -335,8 +337,153 @@ def build_observation_summary_payload(
         "requires_attention": summary["requires_attention"],
         "warning_count": len(summary["warnings"]),
         "live_leverage_approved": False,
-        "production_conclusion": "Research PASS / Production design APPROVED / Live leveraged execution NOT YET APPROVED",
+        "production_conclusion": PRODUCTION_CONCLUSION,
         "summary": summary,
+    }
+
+
+def _check_result(name: str, passed: bool, message: str, details: dict[str, Any] | None = None) -> dict[str, Any]:
+    return {
+        "name": name,
+        "passed": bool(passed),
+        "message": message,
+        "details": details or {},
+    }
+
+
+def _blocker(code: str, message: str) -> dict[str, str]:
+    return {"code": code, "message": message}
+
+
+def build_stage95_admission_payload(
+    portfolio_id: str,
+    shadow_dir: Path | None = None,
+    stale_after_hours: int = DEFAULT_STALE_AFTER_HOURS,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Return a read-only production-admission gate summary.
+
+    The gate can say evidence is ready for human review. It never approves live
+    leverage or broker execution.
+    """
+    shadow_audit = build_shadow_audit_payload(
+        portfolio_id,
+        shadow_dir=shadow_dir,
+        stale_after_hours=stale_after_hours,
+        now=now,
+    )
+    observation = build_observation_summary_payload(portfolio_id, shadow_dir=shadow_dir)
+    summary = observation["summary"]
+
+    expected_cycles = int(summary.get("expected_cycles") or 0)
+    observed_cycles = int(summary.get("observed_cycles") or 0)
+    coverage_ratio = float(summary.get("coverage_ratio") or 0.0)
+    broker_unavailable_cycles = int(summary.get("broker_unavailable_cycles") or 0)
+    critical_cycles = int(summary.get("critical_cycles") or 0)
+    stale_gap_count = int(summary.get("stale_gap_count") or 0)
+    margin_coverage = (
+        summary.get("margin_field_coverage")
+        if isinstance(summary.get("margin_field_coverage"), dict)
+        else {}
+    )
+    all_required_margin_ratio = float(margin_coverage.get("all_required_ratio") or 0.0)
+
+    checks = [
+        _check_result(
+            "latest_shadow_audit_healthy",
+            shadow_audit["status"] == "HEALTHY" and not shadow_audit["requires_attention"],
+            "latest shadow sync and margin snapshot are healthy",
+            {
+                "status": shadow_audit["status"],
+                "level": shadow_audit["level"],
+                "warning_count": shadow_audit["warning_count"],
+            },
+        ),
+        _check_result(
+            "no_stale_latest_reports",
+            int(shadow_audit.get("stale_report_count") or 0) == 0 and not bool(summary.get("latest_is_stale")),
+            "latest Stage 9.5 reports are fresh",
+            {
+                "shadow_stale_report_count": shadow_audit.get("stale_report_count"),
+                "summary_latest_is_stale": summary.get("latest_is_stale"),
+                "stale_after_hours": stale_after_hours,
+            },
+        ),
+        _check_result(
+            "observation_window_complete",
+            expected_cycles > 0 and observed_cycles >= expected_cycles and coverage_ratio >= 1.0,
+            "required Stage 9.5 observation window is complete",
+            {
+                "expected_cycles": expected_cycles,
+                "observed_cycles": observed_cycles,
+                "coverage_ratio": coverage_ratio,
+            },
+        ),
+        _check_result(
+            "observation_summary_clean",
+            observation["status"] == "OBSERVED" and not observation["requires_attention"],
+            "observation summary has no attention or critical state",
+            {
+                "status": observation["status"],
+                "level": observation["level"],
+                "critical_cycles": critical_cycles,
+                "stale_gap_count": stale_gap_count,
+            },
+        ),
+        _check_result(
+            "broker_readonly_available",
+            broker_unavailable_cycles == 0,
+            "broker read-only snapshots were available throughout the observation window",
+            {"broker_unavailable_cycles": broker_unavailable_cycles},
+        ),
+        _check_result(
+            "margin_fields_complete",
+            observed_cycles > 0 and all_required_margin_ratio >= 1.0,
+            "required margin fields were present in every observed cycle",
+            {
+                "all_required_ratio": all_required_margin_ratio,
+                "required_fields": margin_coverage.get("required_fields") or [],
+            },
+        ),
+        _check_result(
+            "live_leverage_remains_disabled",
+            not bool(shadow_audit.get("live_leverage_approved")) and not bool(observation.get("live_leverage_approved")),
+            "live leverage approval remains disabled",
+            {
+                "shadow_live_leverage_approved": shadow_audit.get("live_leverage_approved"),
+                "summary_live_leverage_approved": observation.get("live_leverage_approved"),
+            },
+        ),
+    ]
+
+    blockers = [_blocker(check["name"], check["message"]) for check in checks if not check["passed"]]
+    if blockers:
+        admission_status = "NOT_APPROVED"
+        level = max(
+            [shadow_audit["level"], observation["level"], "warning"],
+            key=lambda item: LEVEL_RANK.get(item, 0),
+        )
+        requires_attention = True
+    else:
+        admission_status = "READY_FOR_HUMAN_REVIEW"
+        level = "healthy"
+        requires_attention = False
+
+    return {
+        "portfolio_id": portfolio_id,
+        "generated_at": _utc_now_text(),
+        "stage": "Stage 9.5 Production Admission Gate",
+        "status": admission_status,
+        "level": level,
+        "requires_attention": requires_attention,
+        "blockers": blockers,
+        "checks": checks,
+        "live_leverage_approved": False,
+        "human_review_required": True,
+        "production_conclusion": PRODUCTION_CONCLUSION,
+        "readonly": True,
+        "shadow_audit": shadow_audit,
+        "observation_summary": observation,
     }
 
 
@@ -358,3 +505,13 @@ async def get_stage95_observation_summary(
     """Return read-only Stage 9.5 observation summary state for the dashboard."""
     _ = user
     return build_observation_summary_payload(portfolio_id)
+
+
+@router.get("/stage95-admission/{portfolio_id}")
+async def get_stage95_admission(
+    portfolio_id: str,
+    user: dict = Depends(get_current_user),
+):
+    """Return the read-only Stage 9.5 production admission gate state."""
+    _ = user
+    return build_stage95_admission_payload(portfolio_id)

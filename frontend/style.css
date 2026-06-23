@@ -483,6 +483,18 @@ tbody tr:nth-child(even):hover {
 .stage95-summary {
   margin-top: 10px;
 }
+.stage95-admission {
+  margin-top: 10px;
+}
+.stage95-section.level-healthy {
+  border-color: rgba(90,154,110,0.28);
+}
+.stage95-section.level-warning {
+  border-color: rgba(234,179,8,0.28);
+}
+.stage95-section.level-critical {
+  border-color: rgba(176,112,112,0.42);
+}
 .stage95-summary-head {
   display: flex;
   justify-content: space-between;
