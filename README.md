@@ -113,6 +113,8 @@ Benchmark 对比必须使用双口径：
 
 当前结论是：真实摩擦口径下，候选系统收益低于 `VBIAX / PRPFX`，但最大回撤显著更浅；在 `RPAR` 的较短历史窗口内，收益与回撤均占优。细节见 [Benchmark 对比审计](D:/codeSpace/BreathofEarth/docs/21-Benchmark%E5%AF%B9%E6%AF%94%E5%AE%A1%E8%AE%A1.md)。
 
+后续若研究如何把真实摩擦口径 CAGR 推向 `7% - 8%`，必须先按 [CAGR 提升研究计划](D:/codeSpace/BreathofEarth/docs/22-CAGR%E6%8F%90%E5%8D%87%E7%A0%94%E7%A9%B6%E8%AE%A1%E5%88%92.md) 走旁路审计。该研究不得直接修改生产候选、不得提高 10% 卫星上限、不得把 Stage 9.5 改成交易执行层。
+
 数据文件治理：
 
 - `data/raw/*.csv` 是可再生成的本地缓存，默认不作为普通 PR 审计输入提交。
@@ -279,6 +281,7 @@ BreathofEarth/
 - [IBKR 只读接入清单](D:/codeSpace/BreathofEarth/docs/19-IBKR%E5%8F%AA%E8%AF%BB%E6%8E%A5%E5%85%A5%E6%B8%85%E5%8D%95.md)
 - [真实摩擦压力审计](D:/codeSpace/BreathofEarth/docs/20-%E7%9C%9F%E5%AE%9E%E6%91%A9%E6%93%A6%E5%8E%8B%E5%8A%9B%E5%AE%A1%E8%AE%A1.md)
 - [Benchmark 对比审计](D:/codeSpace/BreathofEarth/docs/21-Benchmark%E5%AF%B9%E6%AF%94%E5%AE%A1%E8%AE%A1.md)
+- [CAGR 提升研究计划](D:/codeSpace/BreathofEarth/docs/22-CAGR%E6%8F%90%E5%8D%87%E7%A0%94%E7%A9%B6%E8%AE%A1%E5%88%92.md)
 
 ## 一句话总结
 
