@@ -1,0 +1,42 @@
+{
+  "snapshot": "2026-06-23-friction-matrix",
+  "source": "research assumptions from historical rate regimes, not account statements",
+  "created_at": "2026-06-23",
+  "policy": {
+    "purpose": "calibrated friction matrix bypass audit input",
+    "routine_refresh_allowed": false,
+    "production_candidate_change": false,
+    "live_tax_or_broker_statement": false
+  },
+  "notes": [
+    "Fed funds rates are annual regime approximations, not daily historical series.",
+    "Dividend yields are rough annual assumptions for SPY and QQQ exposure only.",
+    "Broker spread is applied to SHV/cash exposure, not to the whole portfolio.",
+    "Event drag is applied only on state-machine action dates.",
+    "Replace with IBKR statements and tax-lot records before live use."
+  ],
+  "annual_assumptions": [
+    {"year": 2005, "fed_funds_rate": 0.032, "spy_dividend_yield": 0.018, "qqq_dividend_yield": 0.004, "withholding_tax_rate": 0.30, "broker_spread_bps": 20, "operational_failure_bps": 8, "rebalance_event_bps": 5, "macro_event_bps": 12, "acute_event_bps": 50},
+    {"year": 2006, "fed_funds_rate": 0.050, "spy_dividend_yield": 0.018, "qqq_dividend_yield": 0.004, "withholding_tax_rate": 0.30, "broker_spread_bps": 25, "operational_failure_bps": 8, "rebalance_event_bps": 5, "macro_event_bps": 12, "acute_event_bps": 50},
+    {"year": 2007, "fed_funds_rate": 0.050, "spy_dividend_yield": 0.019, "qqq_dividend_yield": 0.005, "withholding_tax_rate": 0.30, "broker_spread_bps": 25, "operational_failure_bps": 10, "rebalance_event_bps": 6, "macro_event_bps": 15, "acute_event_bps": 60},
+    {"year": 2008, "fed_funds_rate": 0.019, "spy_dividend_yield": 0.028, "qqq_dividend_yield": 0.006, "withholding_tax_rate": 0.30, "broker_spread_bps": 35, "operational_failure_bps": 25, "rebalance_event_bps": 12, "macro_event_bps": 30, "acute_event_bps": 100},
+    {"year": 2009, "fed_funds_rate": 0.002, "spy_dividend_yield": 0.024, "qqq_dividend_yield": 0.006, "withholding_tax_rate": 0.30, "broker_spread_bps": 8, "operational_failure_bps": 15, "rebalance_event_bps": 8, "macro_event_bps": 20, "acute_event_bps": 75},
+    {"year": 2010, "fed_funds_rate": 0.002, "spy_dividend_yield": 0.020, "qqq_dividend_yield": 0.007, "withholding_tax_rate": 0.30, "broker_spread_bps": 5, "operational_failure_bps": 8, "rebalance_event_bps": 5, "macro_event_bps": 12, "acute_event_bps": 50},
+    {"year": 2011, "fed_funds_rate": 0.001, "spy_dividend_yield": 0.021, "qqq_dividend_yield": 0.008, "withholding_tax_rate": 0.30, "broker_spread_bps": 5, "operational_failure_bps": 12, "rebalance_event_bps": 6, "macro_event_bps": 18, "acute_event_bps": 60},
+    {"year": 2012, "fed_funds_rate": 0.001, "spy_dividend_yield": 0.022, "qqq_dividend_yield": 0.009, "withholding_tax_rate": 0.30, "broker_spread_bps": 5, "operational_failure_bps": 8, "rebalance_event_bps": 5, "macro_event_bps": 12, "acute_event_bps": 50},
+    {"year": 2013, "fed_funds_rate": 0.001, "spy_dividend_yield": 0.019, "qqq_dividend_yield": 0.009, "withholding_tax_rate": 0.30, "broker_spread_bps": 5, "operational_failure_bps": 8, "rebalance_event_bps": 5, "macro_event_bps": 12, "acute_event_bps": 50},
+    {"year": 2014, "fed_funds_rate": 0.001, "spy_dividend_yield": 0.019, "qqq_dividend_yield": 0.010, "withholding_tax_rate": 0.30, "broker_spread_bps": 5, "operational_failure_bps": 8, "rebalance_event_bps": 5, "macro_event_bps": 12, "acute_event_bps": 50},
+    {"year": 2015, "fed_funds_rate": 0.001, "spy_dividend_yield": 0.021, "qqq_dividend_yield": 0.010, "withholding_tax_rate": 0.30, "broker_spread_bps": 5, "operational_failure_bps": 10, "rebalance_event_bps": 6, "macro_event_bps": 15, "acute_event_bps": 55},
+    {"year": 2016, "fed_funds_rate": 0.004, "spy_dividend_yield": 0.021, "qqq_dividend_yield": 0.010, "withholding_tax_rate": 0.30, "broker_spread_bps": 6, "operational_failure_bps": 8, "rebalance_event_bps": 5, "macro_event_bps": 12, "acute_event_bps": 50},
+    {"year": 2017, "fed_funds_rate": 0.010, "spy_dividend_yield": 0.019, "qqq_dividend_yield": 0.009, "withholding_tax_rate": 0.30, "broker_spread_bps": 8, "operational_failure_bps": 8, "rebalance_event_bps": 5, "macro_event_bps": 12, "acute_event_bps": 50},
+    {"year": 2018, "fed_funds_rate": 0.018, "spy_dividend_yield": 0.020, "qqq_dividend_yield": 0.009, "withholding_tax_rate": 0.30, "broker_spread_bps": 10, "operational_failure_bps": 10, "rebalance_event_bps": 6, "macro_event_bps": 15, "acute_event_bps": 55},
+    {"year": 2019, "fed_funds_rate": 0.021, "spy_dividend_yield": 0.019, "qqq_dividend_yield": 0.008, "withholding_tax_rate": 0.30, "broker_spread_bps": 10, "operational_failure_bps": 8, "rebalance_event_bps": 5, "macro_event_bps": 12, "acute_event_bps": 50},
+    {"year": 2020, "fed_funds_rate": 0.004, "spy_dividend_yield": 0.018, "qqq_dividend_yield": 0.006, "withholding_tax_rate": 0.30, "broker_spread_bps": 8, "operational_failure_bps": 18, "rebalance_event_bps": 8, "macro_event_bps": 20, "acute_event_bps": 80},
+    {"year": 2021, "fed_funds_rate": 0.001, "spy_dividend_yield": 0.014, "qqq_dividend_yield": 0.005, "withholding_tax_rate": 0.30, "broker_spread_bps": 5, "operational_failure_bps": 8, "rebalance_event_bps": 5, "macro_event_bps": 12, "acute_event_bps": 50},
+    {"year": 2022, "fed_funds_rate": 0.018, "spy_dividend_yield": 0.016, "qqq_dividend_yield": 0.006, "withholding_tax_rate": 0.30, "broker_spread_bps": 18, "operational_failure_bps": 16, "rebalance_event_bps": 8, "macro_event_bps": 25, "acute_event_bps": 70},
+    {"year": 2023, "fed_funds_rate": 0.050, "spy_dividend_yield": 0.015, "qqq_dividend_yield": 0.006, "withholding_tax_rate": 0.30, "broker_spread_bps": 22, "operational_failure_bps": 10, "rebalance_event_bps": 6, "macro_event_bps": 15, "acute_event_bps": 55},
+    {"year": 2024, "fed_funds_rate": 0.053, "spy_dividend_yield": 0.013, "qqq_dividend_yield": 0.006, "withholding_tax_rate": 0.30, "broker_spread_bps": 22, "operational_failure_bps": 10, "rebalance_event_bps": 6, "macro_event_bps": 15, "acute_event_bps": 55},
+    {"year": 2025, "fed_funds_rate": 0.045, "spy_dividend_yield": 0.013, "qqq_dividend_yield": 0.006, "withholding_tax_rate": 0.30, "broker_spread_bps": 20, "operational_failure_bps": 10, "rebalance_event_bps": 6, "macro_event_bps": 15, "acute_event_bps": 55},
+    {"year": 2026, "fed_funds_rate": 0.040, "spy_dividend_yield": 0.013, "qqq_dividend_yield": 0.006, "withholding_tax_rate": 0.30, "broker_spread_bps": 18, "operational_failure_bps": 10, "rebalance_event_bps": 6, "macro_event_bps": 15, "acute_event_bps": 55}
+  ]
+}

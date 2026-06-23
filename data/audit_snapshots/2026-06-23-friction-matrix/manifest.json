@@ -1,0 +1,16 @@
+{
+  "snapshot": "2026-06-23-friction-matrix",
+  "source": "research assumptions from historical rate regimes, not account statements",
+  "created_at": "2026-06-23",
+  "policy": {
+    "purpose": "calibrated friction matrix bypass audit input",
+    "routine_refresh_allowed": false,
+    "production_candidate_change": false,
+    "live_tax_or_broker_statement": false
+  },
+  "files": {
+    "annual_friction_matrix.json": {
+      "sha256": "558ca15df71702485a26ff2411a09df5cfbd6f1d36f335594d47ed9b7474d912"
+    }
+  }
+}

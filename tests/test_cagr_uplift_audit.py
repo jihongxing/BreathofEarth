@@ -159,3 +159,79 @@ def test_static_satellite_sleeve_rejects_bad_weights():
             prices,
             {"QQQ": 0.4, "GLD": 0.4},
         )
+
+
+def test_apply_calibrated_friction_uses_exposure_weighted_costs():
+    dates = pd.to_datetime(["2020-01-02", "2020-01-03", "2020-01-06"])
+    nav = pd.Series([100.0, 101.0, 102.0], index=dates, name="research")
+    exposures = pd.DataFrame(
+        {
+            "SPY": [0.50, 0.50, 0.50],
+            "QQQ": [0.10, 0.10, 0.10],
+            "SHV": [0.25, 0.25, 0.25],
+            "action": ["", "进入宏观慢熊防御", ""],
+            "event_turnover": [0.0, 0.50, 0.0],
+        },
+        index=dates,
+    )
+    assumptions = {
+        2020: audit.AnnualFrictionAssumption(
+            year=2020,
+            fed_funds_rate=0.01,
+            spy_dividend_yield=0.02,
+            qqq_dividend_yield=0.01,
+            withholding_tax_rate=0.30,
+            broker_spread_bps=20,
+            operational_failure_bps=10,
+            rebalance_event_bps=5,
+            macro_event_bps=25,
+            acute_event_bps=50,
+        )
+    }
+
+    result = audit.apply_calibrated_friction(nav, exposures, assumptions)
+
+    assert result.cagr < audit.calculate_cagr(nav)
+    assert result.tax_cost > 0
+    assert result.broker_cost > 0
+    assert result.operational_cost > 0
+    assert result.event_cost > 0
+    assert result.ledger.loc[dates[1], "event"] == "macro"
+    assert result.ledger.loc[dates[0], "event_cost"] == 0
+
+
+def test_load_annual_friction_assumptions_reads_matrix(tmp_path):
+    matrix = tmp_path / "annual_friction_matrix.json"
+    matrix.write_text(
+        json.dumps(
+            {
+                "annual_assumptions": [
+                    {
+                        "year": 2020,
+                        "fed_funds_rate": 0.01,
+                        "spy_dividend_yield": 0.02,
+                        "qqq_dividend_yield": 0.01,
+                        "withholding_tax_rate": 0.30,
+                        "broker_spread_bps": 20,
+                        "operational_failure_bps": 10,
+                        "rebalance_event_bps": 5,
+                        "macro_event_bps": 25,
+                        "acute_event_bps": 50,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assumptions = audit.load_annual_friction_assumptions(matrix)
+
+    assert assumptions[2020].withholding_tax_rate == 0.30
+    assert assumptions[2020].macro_event_bps == 25
+
+
+def test_classify_execution_event_maps_actions():
+    assert audit.classify_execution_event("") == "none"
+    assert audit.classify_execution_event("进入非对称防御") == "acute"
+    assert audit.classify_execution_event("进入宏观慢熊防御") == "macro"
+    assert audit.classify_execution_event("年度再平衡") == "rebalance"

@@ -37,6 +37,7 @@ from backtest.real_world_friction_audit import (
     PRODUCTION_SLEEVE_WEIGHTS,
     RealWorldFrictionScenario,
     apply_real_world_friction,
+    production_candidate_nav,
 )
 from backtest.return_attribution import (
     AttributionAudit,
@@ -51,6 +52,8 @@ DATA_DIR = Path("data")
 RAW_DIR = DATA_DIR / "raw"
 CASH_PROXY_SNAPSHOT_DIR = DATA_DIR / "audit_snapshots" / "2026-06-23-cash-proxy"
 TREND_SNAPSHOT_DIR = DATA_DIR / "audit_snapshots" / "2026-06-23-trend-satellite"
+FRICTION_MATRIX_DIR = DATA_DIR / "audit_snapshots" / "2026-06-23-friction-matrix"
+FRICTION_MATRIX_FILE = FRICTION_MATRIX_DIR / "annual_friction_matrix.json"
 DEFAULT_START = "2005-01-03"
 DEFAULT_END = "2026-04-30"
 CASH_PROXY_TICKERS = ["SHV", "BIL", "SGOV", "USFR", "TFLO"]
@@ -138,6 +141,38 @@ class TrendSatelliteAuditRow:
     crisis_2022_return: float | None
     crisis_2022_mdd: float | None
     pass_mdd_guardrail: bool
+
+
+@dataclass(frozen=True)
+class AnnualFrictionAssumption:
+    year: int
+    fed_funds_rate: float
+    spy_dividend_yield: float
+    qqq_dividend_yield: float
+    withholding_tax_rate: float
+    broker_spread_bps: float
+    operational_failure_bps: float
+    rebalance_event_bps: float
+    macro_event_bps: float
+    acute_event_bps: float
+
+
+@dataclass(frozen=True)
+class CalibratedFrictionResult:
+    name: str
+    nav: pd.Series
+    ledger: pd.DataFrame
+    cagr: float
+    mdd: float
+    final: float
+    research_cagr: float
+    research_mdd: float
+    cagr_delta: float
+    mdd_delta: float
+    tax_cost: float
+    broker_cost: float
+    operational_cost: float
+    event_cost: float
 
 
 def _validate_positive(series: pd.Series, ticker: str, source: Path | str) -> pd.Series:
@@ -747,6 +782,244 @@ def evaluate_trend_satellite(
     )
 
 
+def load_annual_friction_assumptions(
+    path: Path = FRICTION_MATRIX_FILE,
+) -> dict[int, AnnualFrictionAssumption]:
+    if not path.exists():
+        raise FileNotFoundError(
+            f"missing annual friction matrix: {path}. "
+            "Restore data/audit_snapshots/2026-06-23-friction-matrix."
+        )
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    rows = payload.get("annual_assumptions", [])
+    assumptions: dict[int, AnnualFrictionAssumption] = {}
+    for row in rows:
+        item = AnnualFrictionAssumption(
+            year=int(row["year"]),
+            fed_funds_rate=float(row["fed_funds_rate"]),
+            spy_dividend_yield=float(row["spy_dividend_yield"]),
+            qqq_dividend_yield=float(row["qqq_dividend_yield"]),
+            withholding_tax_rate=float(row["withholding_tax_rate"]),
+            broker_spread_bps=float(row["broker_spread_bps"]),
+            operational_failure_bps=float(row["operational_failure_bps"]),
+            rebalance_event_bps=float(row["rebalance_event_bps"]),
+            macro_event_bps=float(row["macro_event_bps"]),
+            acute_event_bps=float(row["acute_event_bps"]),
+        )
+        assumptions[item.year] = item
+    if not assumptions:
+        raise ValueError(f"annual friction matrix has no assumptions: {path}")
+    return assumptions
+
+
+def build_production_exposure_frame(defensive_audit: AttributionAudit | None = None) -> pd.DataFrame:
+    """Approximate daily production-candidate exposures without changing the 90/10 topology."""
+    audit = defensive_audit or run_return_attribution()
+    history = audit.history
+    exposures = pd.DataFrame(index=history.index)
+    exposures["SPY"] = 0.90 * history["SPY_start_weight"] + 0.10 * PRODUCTION_BETA_WEIGHTS["SPY"]
+    exposures["TLT"] = 0.90 * history["TLT_start_weight"]
+    exposures["GLD"] = 0.90 * history["GLD_start_weight"] + 0.10 * PRODUCTION_BETA_WEIGHTS["GLD"]
+    exposures["SHV"] = 0.90 * history["SHV_start_weight"]
+    exposures["QQQ"] = 0.10 * PRODUCTION_BETA_WEIGHTS["QQQ"]
+    exposures["action"] = history["action"].fillna("")
+    defensive_turnover = pd.Series(0.0, index=history.index)
+    for asset in ASSETS:
+        defensive_turnover += (
+            history[f"{asset}_end_weight"] - history[f"{asset}_start_weight"]
+        ).abs()
+    exposures["event_turnover"] = 0.90 * defensive_turnover / 2.0
+    return exposures
+
+
+def classify_execution_event(action: str) -> str:
+    if not action:
+        return "none"
+    if "进入非对称防御" in action or "恢复期再触发防御" in action:
+        return "acute"
+    if "宏观慢熊" in action:
+        return "macro"
+    if "再平衡" in action or "恢复" in action or "防御" in action:
+        return "rebalance"
+    return "rebalance"
+
+
+def _assumption_for_year(
+    assumptions: dict[int, AnnualFrictionAssumption],
+    year: int,
+) -> AnnualFrictionAssumption:
+    if year in assumptions:
+        return assumptions[year]
+    available = sorted(assumptions)
+    if year < available[0]:
+        return assumptions[available[0]]
+    return assumptions[available[-1]]
+
+
+def _event_bps(assumption: AnnualFrictionAssumption, event: str) -> float:
+    if event == "acute":
+        return assumption.acute_event_bps
+    if event == "macro":
+        return assumption.macro_event_bps
+    if event == "rebalance":
+        return assumption.rebalance_event_bps
+    return 0.0
+
+
+def apply_calibrated_friction(
+    research_nav: pd.Series,
+    exposures: pd.DataFrame,
+    assumptions: dict[int, AnnualFrictionAssumption],
+    name: str = "calibrated_base_case",
+    tax_multiplier: float = 1.0,
+    broker_multiplier: float = 1.0,
+    operational_multiplier: float = 1.0,
+    event_multiplier: float = 1.0,
+) -> CalibratedFrictionResult:
+    research_nav = research_nav.sort_index().astype(float)
+    exposure = exposures.reindex(research_nav.index).ffill().bfill()
+    if research_nav.empty:
+        raise ValueError("research_nav cannot be empty")
+    if (research_nav <= 0).any():
+        raise ValueError("research_nav must contain only positive values")
+    missing = [col for col in ["SPY", "QQQ", "SHV", "action", "event_turnover"] if col not in exposure.columns]
+    if missing:
+        raise ValueError(f"exposure frame missing columns: {missing}")
+
+    research_returns = research_nav.pct_change().fillna(0.0)
+    current_nav = float(research_nav.iloc[0])
+    nav_values: list[float] = []
+    rows: list[dict] = []
+
+    for current_date, research_return in research_returns.items():
+        assumption = _assumption_for_year(assumptions, int(current_date.year))
+        row = exposure.loc[current_date]
+        start_nav = current_nav
+        tax_drag = (
+            (
+                float(row["SPY"]) * assumption.spy_dividend_yield
+                + float(row["QQQ"]) * assumption.qqq_dividend_yield
+            )
+            * assumption.withholding_tax_rate
+            * tax_multiplier
+            / 252.0
+        )
+        broker_drag = (
+            float(row["SHV"])
+            * (assumption.broker_spread_bps * broker_multiplier / 10_000.0)
+            / 252.0
+        )
+        operational_drag = (
+            assumption.operational_failure_bps
+            * operational_multiplier
+            / 10_000.0
+            / 252.0
+        )
+        event = classify_execution_event(str(row["action"]))
+        event_drag = (
+            max(float(row["event_turnover"]), 0.0)
+            * _event_bps(assumption, event)
+            * event_multiplier
+            / 10_000.0
+        )
+        tax_cost = start_nav * tax_drag
+        broker_cost = start_nav * broker_drag
+        operational_cost = start_nav * operational_drag
+        event_cost = start_nav * event_drag
+        research_pnl = start_nav * float(research_return)
+        total_cost = tax_cost + broker_cost + operational_cost + event_cost
+        current_nav = max(start_nav + research_pnl - total_cost, 0.0)
+        nav_values.append(current_nav)
+        rows.append(
+            {
+                "date": current_date,
+                "year": int(current_date.year),
+                "start_nav": start_nav,
+                "research_return": float(research_return),
+                "research_pnl": research_pnl,
+                "tax_cost": tax_cost,
+                "broker_cost": broker_cost,
+                "operational_cost": operational_cost,
+                "event_cost": event_cost,
+                "total_cost": total_cost,
+                "end_nav": current_nav,
+                "event": event,
+                "spy_exposure": float(row["SPY"]),
+                "qqq_exposure": float(row["QQQ"]),
+                "shv_exposure": float(row["SHV"]),
+                "event_turnover": float(row["event_turnover"]),
+            }
+        )
+
+    nav = pd.Series(nav_values, index=research_nav.index, name=name)
+    ledger = pd.DataFrame(rows).set_index("date")
+    cagr = calculate_cagr(nav)
+    mdd = calculate_mdd(nav)
+    research_cagr = calculate_cagr(research_nav)
+    research_mdd = calculate_mdd(research_nav)
+    return CalibratedFrictionResult(
+        name=name,
+        nav=nav,
+        ledger=ledger,
+        cagr=cagr,
+        mdd=mdd,
+        final=float(nav.iloc[-1]),
+        research_cagr=research_cagr,
+        research_mdd=research_mdd,
+        cagr_delta=cagr - research_cagr,
+        mdd_delta=mdd - research_mdd,
+        tax_cost=float(ledger["tax_cost"].sum()),
+        broker_cost=float(ledger["broker_cost"].sum()),
+        operational_cost=float(ledger["operational_cost"].sum()),
+        event_cost=float(ledger["event_cost"].sum()),
+    )
+
+
+def annual_calibrated_ledger(result: CalibratedFrictionResult) -> pd.DataFrame:
+    rows = []
+    for year, group in result.ledger.groupby("year"):
+        rows.append(
+            {
+                "year": int(year),
+                "start_nav": float(group["start_nav"].iloc[0]),
+                "end_nav": float(group["end_nav"].iloc[-1]),
+                "research_pnl": float(group["research_pnl"].sum()),
+                "tax_cost": float(group["tax_cost"].sum()),
+                "broker_cost": float(group["broker_cost"].sum()),
+                "operational_cost": float(group["operational_cost"].sum()),
+                "event_cost": float(group["event_cost"].sum()),
+                "total_cost": float(group["total_cost"].sum()),
+            }
+        )
+    return pd.DataFrame(rows).set_index("year")
+
+
+def run_calibrated_friction_audit(
+    matrix_path: Path = FRICTION_MATRIX_FILE,
+) -> dict[str, CalibratedFrictionResult]:
+    assumptions = load_annual_friction_assumptions(matrix_path)
+    research = production_candidate_nav()
+    exposures = build_production_exposure_frame()
+    return {
+        "calibrated_base_case": apply_calibrated_friction(
+            research.nav,
+            exposures,
+            assumptions,
+            name="calibrated_base_case",
+        ),
+        "calibrated_harsh_case": apply_calibrated_friction(
+            research.nav,
+            exposures,
+            assumptions,
+            name="calibrated_harsh_case",
+            tax_multiplier=1.15,
+            broker_multiplier=1.75,
+            operational_multiplier=2.0,
+            event_multiplier=2.0,
+        ),
+    }
+
+
 def run_trend_satellite_uplift_audit(
     allow_download: bool = True,
     trend_snapshot_dir: Path = TREND_SNAPSHOT_DIR,
@@ -955,11 +1228,59 @@ def print_trend_report(rows: list[TrendSatelliteAuditRow]) -> None:
     print("=" * 172)
 
 
+def print_calibrated_friction_report(results: dict[str, CalibratedFrictionResult]) -> None:
+    research = production_candidate_nav()
+    static_base = apply_real_world_friction(research.nav, BASE_REAL_WORLD_SCENARIO)
+    static_harsh = apply_real_world_friction(research.nav, HARSH_REAL_WORLD_SCENARIO)
+    static_rows = {
+        "research_current": (research.nav, 0.0, 0.0, 0.0, 0.0),
+        "static_unlevered_base": (static_base, None, None, None, None),
+        "static_unlevered_harsh": (static_harsh, None, None, None, None),
+    }
+
+    print("\n" + "=" * 172)
+    print("  CAGR Uplift Audit: Calibrated Friction Matrix")
+    print("=" * 172)
+    print("  Boundary: this is an accounting audit only; it does not change strategy weights or live status.")
+    print("  Static drag remains the conservative pressure lens; calibrated drag tests possible over-penalization.")
+    print("-" * 172)
+    print(
+        f"  {'Scenario':<26} {'CAGR':>8} {'MDD':>9} {'Final NAV':>13} "
+        f"{'Tax':>11} {'Broker':>11} {'Ops':>11} {'Events':>11} {'CAGR Δ vs research':>17}"
+    )
+    for name, (nav, tax, broker, ops, events) in static_rows.items():
+        cagr = calculate_cagr(nav)
+        mdd = calculate_mdd(nav)
+        delta = cagr - research.cagr
+        def fmt(value):
+            return "N/A" if value is None else f"{value:,.2f}"
+        print(
+            f"  {name:<26} {cagr:>7.2%} {mdd:>8.2%} {float(nav.iloc[-1]):>13,.2f} "
+            f"{fmt(tax):>11} {fmt(broker):>11} {fmt(ops):>11} {fmt(events):>11} {delta:>16.2%}"
+        )
+    for result in results.values():
+        print(
+            f"  {result.name:<26} {result.cagr:>7.2%} {result.mdd:>8.2%} {result.final:>13,.2f} "
+            f"{result.tax_cost:>11,.2f} {result.broker_cost:>11,.2f} "
+            f"{result.operational_cost:>11,.2f} {result.event_cost:>11,.2f} "
+            f"{result.cagr_delta:>16.2%}"
+        )
+    print("-" * 172)
+    print("  Interpretation:")
+    print("  - Calibrated costs are daily dollar ledger costs, not a flat annual haircut.")
+    print("  - Dividend withholding is exposure-weighted for SPY/QQQ only in this model.")
+    print("  - Broker spread is applied to SHV/cash exposure; event drag is applied only to estimated turnover on action dates.")
+    print("  - Replace this matrix with account statements before treating it as a live tax or broker ledger.")
+    print("=" * 172)
+
+
 def main() -> None:
     cash_rows = run_cash_proxy_uplift_audit()
     print_report(cash_rows)
     trend_rows = run_trend_satellite_uplift_audit()
     print_trend_report(trend_rows)
+    calibrated = run_calibrated_friction_audit()
+    print_calibrated_friction_report(calibrated)
 
 
 if __name__ == "__main__":
