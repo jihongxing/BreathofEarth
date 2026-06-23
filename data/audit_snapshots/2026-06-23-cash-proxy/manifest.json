@@ -7,6 +7,30 @@
     "routine_refresh_allowed": false,
     "production_candidate_change": false
   },
+  "scenario_sources": {
+    "prices": "Yahoo Adj Close research input; not an IBKR cash ledger or fund distribution statement",
+    "cash_proxy_role": "bypass audit substitution for SHV exposure only; not a production cash sweep instruction",
+    "tax_and_distribution": "handled by the research friction model where applicable; not entity-specific tax advice"
+  },
+  "sensitivity_boundary": {
+    "short_history": {
+      "SGOV": "starts in 2020 and lacks 2008/2011/2015 full-cycle evidence",
+      "USFR": "starts in 2014 and lacks 2008 crisis evidence",
+      "TFLO": "starts in 2014 and lacks 2008 crisis evidence"
+    },
+    "not_covered": [
+      "actual broker cash sweep interest",
+      "actual ETF distribution withholding records",
+      "intraday liquidity and spread behavior",
+      "future ETF fee, structure, or index methodology changes"
+    ]
+  },
+  "failure_boundary": {
+    "production_use": "cash proxy results are research-only and must not replace SHV in the production candidate without a separate approved audit",
+    "missing_or_stale_distribution_data": "do not infer tax-adjusted live carry from this snapshot",
+    "stage95_missing_or_unavailable": "cash proxy uplift cannot be used for live capital allocation",
+    "live_execution_gate_enabled": "cash proxy audit must remain disconnected from broker order submission"
+  },
   "tickers": {
     "BIL": {
       "rows": 4761,

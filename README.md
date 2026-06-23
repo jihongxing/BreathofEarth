@@ -106,6 +106,13 @@ flowchart TD
 
 这说明当前 90/10 候选更适合定义为防御底座，而不是已经满足高净后收益目标的完整实盘系统。细节见 [真实摩擦压力审计](D:/codeSpace/BreathofEarth/docs/20-%E7%9C%9F%E5%AE%9E%E6%91%A9%E6%93%A6%E5%8E%8B%E5%8A%9B%E5%AE%A1%E8%AE%A1.md)。
 
+校准摩擦矩阵研究口径：
+
+- `calibrated_base_case`：约 `CAGR 7.03% / MDD -14.56%`
+- `calibrated_harsh_case`：约 `CAGR 6.60% / MDD -15.10%`
+
+该校准只用于检验静态年化拖累是否过度扣罚，属于年度假设矩阵下的研究估算。它不是 IBKR 真实对账单，不是税务意见，不是实盘可得收益，也不改变 `Live leveraged execution NOT YET APPROVED`。
+
 Benchmark 对比必须使用双口径：
 
 - 研究口径：`research_current`

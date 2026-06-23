@@ -7,6 +7,28 @@
     "routine_refresh_allowed": false,
     "production_candidate_change": false
   },
+  "scenario_sources": {
+    "prices": "Yahoo Adj Close research input for DBMF; not a manager statement or futures account ledger",
+    "cta_proxy_role": "bypass audit proxy for a small satellite allocation only",
+    "tax_and_distribution": "handled by the research friction model where applicable; not entity-specific tax advice"
+  },
+  "sensitivity_boundary": {
+    "DBMF": "starts in 2019 and does not contain 2008, 2011, or 2015 crisis evidence",
+    "confidence": "LOW_SHORT_HISTORY unless a long-history CTA proxy or live account evidence is added",
+    "not_covered": [
+      "actual managed-futures tax character",
+      "actual fund distribution withholding records",
+      "pre-2019 CTA behavior",
+      "live futures roll costs or manager replication error",
+      "intraday liquidity and spread behavior"
+    ]
+  },
+  "failure_boundary": {
+    "production_use": "trend satellite results are research-only and must not alter the 10% default satellite without a separate approved audit",
+    "long_history_proxy_missing": "DBMF result cannot support a full-cycle production conclusion",
+    "stage95_missing_or_unavailable": "trend satellite result cannot be used for live capital allocation",
+    "live_execution_gate_enabled": "trend satellite audit must remain disconnected from broker order submission"
+  },
   "tickers": {
     "DBMF": {
       "rows": 1755,
