@@ -374,10 +374,14 @@ async function loadDashboard() {
     var stage95AdmissionPromise = api("/api/stage95-admission/" + currentPortfolio).catch(function(err) {
       return buildStage95AdmissionErrorPayload(err);
     });
+    var multiStrategyShadowPromise = api("/api/multi-strategy-shadow/" + currentPortfolio).catch(function(err) {
+      return buildMultiStrategyShadowErrorPayload(err);
+    });
     var d = await api("/api/dashboard/" + currentPortfolio + "?days=90");
     var shadowAudit = await shadowAuditPromise;
     var stage95Summary = await stage95SummaryPromise;
     var stage95Admission = await stage95AdmissionPromise;
+    var multiStrategyShadow = await multiStrategyShadowPromise;
 
     document.getElementById("stat-nav").textContent = d.currency + formatNum(d.current_nav);
 
@@ -394,7 +398,7 @@ async function loadDashboard() {
     renderDrawdownChart(d.drawdown_series);
     renderRiskEvents(d.risk_events);
     renderObservationOverview(d.observation_overview, d.currency);
-    renderStage95ShadowAudit(shadowAudit, stage95Summary, stage95Admission, d.currency);
+    renderStage95ShadowAudit(shadowAudit, stage95Summary, stage95Admission, d.currency, multiStrategyShadow);
     renderCoreObservationHistory(d.core_observation, d.currency);
     renderBrokerSync(d.broker_sync, d.currency, d.core_observation);
     renderShadowRun(d.shadow_run);
@@ -980,7 +984,34 @@ function buildStage95AdmissionErrorPayload(err) {
   };
 }
 
-function renderStage95ShadowAudit(auditData, summaryData, admissionData, currencySymbol) {
+function buildMultiStrategyShadowErrorPayload(err) {
+  return {
+    status: "UNAVAILABLE",
+    level: "warning",
+    requires_attention: true,
+    warning_count: 1,
+    live_leverage_approved: false,
+    human_review_required: true,
+    readonly: true,
+    trading_disabled: true,
+    production_conclusion: "Research PASS / Production design APPROVED / Live leveraged execution NOT YET APPROVED",
+    multi_strategy_shadow: {
+      status: "UNAVAILABLE",
+      level: "warning",
+      requires_attention: true,
+      warning_count: 1,
+      warnings: [err && err.message ? err.message : t("multiStrategyApiUnavailable")],
+      strategies: {},
+      strategy_count: 0,
+      live_leverage_approved: false,
+      human_review_required: true,
+      readonly: true,
+      trading_disabled: true,
+    },
+  };
+}
+
+function renderStage95ShadowAudit(auditData, summaryData, admissionData, currencySymbol, multiStrategyData) {
   var el = document.getElementById("stage95-shadow-audit");
   if (!el) return;
 
@@ -1075,7 +1106,95 @@ function renderStage95ShadowAudit(auditData, summaryData, admissionData, currenc
         : '') +
       renderStage95ObservationSummary(summaryData, summary) +
       renderStage95AdmissionGate(admissionData) +
+      renderMultiStrategyShadowPanel(multiStrategyData, currencySymbol) +
       '<div class="broker-sync-overall-note">' + esc(t("stage95ReadonlyHint")) + '</div>' +
+    '</div>';
+}
+
+function renderMultiStrategyShadowPanel(data, currencySymbol) {
+  if (!data || !data.multi_strategy_shadow) {
+    return '' +
+      '<div class="stage95-section multi-strategy-panel level-missing">' +
+        '<div class="stage95-section-title">' + esc(t("multiStrategyTitle")) + '</div>' +
+        '<div class="stage95-empty">' + esc(t("multiStrategyMissing")) + '</div>' +
+      '</div>';
+  }
+
+  var shadow = data.multi_strategy_shadow || {};
+  var strategies = shadow.strategies || {};
+  var ids = Object.keys(strategies).sort();
+  var warningItems = (shadow.warnings || []).slice(0, 3);
+  var level = data.level || shadow.level || "missing";
+
+  var rows = ids.map(function(strategyId) {
+    var item = strategies[strategyId] || {};
+    var targetWeights = item.target_weights || {};
+    var weightText = Object.keys(targetWeights).sort().map(function(symbol) {
+      return symbol + " " + formatWeightPercent(targetWeights[symbol]);
+    }).join(" · ");
+    var slippage = item.slippage_audit || {};
+    var margin = item.margin_snapshot || {};
+    var admission = item.admission_status || (item.audit_result || {}).admission_status || "NOT_APPROVED";
+    var itemLevel = item.level || (item.requires_attention ? "warning" : "healthy");
+    return '' +
+      '<tr>' +
+        '<td><span class="stage95-asset-symbol">' + esc(item.display_name || strategyId) + '</span><div class="multi-strategy-id">' + esc(strategyId) + '</div></td>' +
+        '<td><span class="badge ' + brokerBadgeClass(itemLevel) + '">' + esc(String(item.status || "--")) + '</span></td>' +
+        '<td>' + esc(admission) + '</td>' +
+        '<td class="multi-strategy-weights">' + esc(weightText || "--") + '</td>' +
+        '<td>' + esc(String(slippage.status || "--")) + '</td>' +
+        '<td>' + esc(String(margin.status || "--")) + '</td>' +
+      '</tr>';
+  }).join("");
+
+  return '' +
+    '<div class="stage95-section multi-strategy-panel level-' + esc(level) + '">' +
+      '<div class="stage95-summary-head">' +
+        '<div>' +
+          '<div class="stage95-section-title">' + esc(t("multiStrategyTitle")) + '</div>' +
+          '<div class="stage95-summary-subtitle">' + esc(t("multiStrategyStatus")) + ': ' + esc(String(data.status || shadow.status || "--")) + '</div>' +
+        '</div>' +
+        '<span class="badge ' + brokerBadgeClass(level) + '">' + esc(
+          data.requires_attention ? t("brokerAttentionNeeded") : t("brokerAttentionNotNeeded")
+        ) + '</span>' +
+      '</div>' +
+      '<div class="stage95-summary-grid">' +
+        '<div class="stage95-summary-metric">' +
+          '<span>' + esc(t("multiStrategyCount")) + '</span>' +
+          '<strong>' + esc(String(shadow.strategy_count || ids.length || 0)) + '</strong>' +
+        '</div>' +
+        '<div class="stage95-summary-metric">' +
+          '<span>' + esc(t("stage95Age")) + '</span>' +
+          '<strong>' + esc(formatAgeHours(shadow.age_hours)) + '</strong>' +
+        '</div>' +
+        '<div class="stage95-summary-metric">' +
+          '<span>' + esc(t("stage95StaleReports")) + '</span>' +
+          '<strong>' + esc(shadow.stale_report ? t("stage95Yes") : t("stage95No")) + '</strong>' +
+        '</div>' +
+        '<div class="stage95-summary-metric">' +
+          '<span>' + esc(t("stage95LiveLeverage")) + '</span>' +
+          '<strong>' + esc(data.live_leverage_approved === true ? t("stage95Approved") : t("stage95NotApproved")) + '</strong>' +
+        '</div>' +
+      '</div>' +
+      '<div class="multi-strategy-table-wrap">' +
+        '<table class="multi-strategy-table" aria-label="' + esc(t("multiStrategyTitle")) + '">' +
+          '<thead><tr>' +
+            '<th>' + esc(t("multiStrategyStrategy")) + '</th>' +
+            '<th>' + esc(t("stage95Status")) + '</th>' +
+            '<th>' + esc(t("multiStrategyAdmission")) + '</th>' +
+            '<th>' + esc(t("stage95TargetBook")) + '</th>' +
+            '<th>' + esc(t("stage95Slippage")) + '</th>' +
+            '<th>' + esc(t("stage95MarginSnapshot")) + '</th>' +
+          '</tr></thead>' +
+          '<tbody>' + (rows || '<tr><td colspan="6"><div class="stage95-empty">' + esc(t("multiStrategyMissing")) + '</div></td></tr>') + '</tbody>' +
+        '</table>' +
+      '</div>' +
+      (warningItems.length
+        ? '<div class="shadow-run-warnings stage95-warnings">' + warningItems.map(function(item) {
+            return '<div class="shadow-run-warning">' + esc(item) + '</div>';
+          }).join("") + '</div>'
+        : '') +
+      '<div class="broker-sync-overall-note">' + esc(t("multiStrategyReadonlyHint")) + '</div>' +
     '</div>';
 }
 

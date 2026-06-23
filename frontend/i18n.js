@@ -248,6 +248,14 @@ const LANGS = {
     stage95AdmissionReadyHint: "证据链已满足进入人工评审的条件，但仍不代表实盘、杠杆或下单获批。",
     stage95AdmissionReadonlyHint: "该门禁只读展示后端审计结论，不提供交易、加杠杆或 Shadow 转 Live 控件。",
     stage95ReadonlyHint: "这里只展示 Stage 9.5 影子同步与保证金观察，不提供交易、加杠杆或 Shadow 转 Live 入口。",
+    multiStrategyTitle: "多策略影子观察",
+    multiStrategyStatus: "观察状态",
+    multiStrategyCount: "策略数",
+    multiStrategyStrategy: "策略",
+    multiStrategyAdmission: "准入",
+    multiStrategyMissing: "暂无多策略影子观察报告",
+    multiStrategyApiUnavailable: "多策略影子观察接口暂不可用",
+    multiStrategyReadonlyHint: "这里只横向展示多套策略的只读影子审计结果，不提供交易、加杠杆或 Shadow 转 Live 控件。",
 
     // ── 出金管理 ──
     withdrawalMgmt: "出金管理",
@@ -735,6 +743,14 @@ const LANGS = {
     stage95AdmissionReadyHint: "Evidence is sufficient for human review, but this is not live, leverage, or order approval.",
     stage95AdmissionReadonlyHint: "This gate only displays backend audit conclusions. It provides no trading, leverage, or Shadow-to-Live control.",
     stage95ReadonlyHint: "This only displays Stage 9.5 shadow sync and margin observations. It provides no trading, leverage, or Shadow-to-Live control.",
+    multiStrategyTitle: "Multi-Strategy Shadow Watch",
+    multiStrategyStatus: "Observation Status",
+    multiStrategyCount: "Strategies",
+    multiStrategyStrategy: "Strategy",
+    multiStrategyAdmission: "Admission",
+    multiStrategyMissing: "No multi-strategy shadow report yet",
+    multiStrategyApiUnavailable: "Multi-strategy shadow API is unavailable",
+    multiStrategyReadonlyHint: "This only compares read-only shadow audit results across strategies. It provides no trading, leverage, or Shadow-to-Live control.",
 
     // ── Withdrawals ──
     withdrawalMgmt: "Withdrawal Management",

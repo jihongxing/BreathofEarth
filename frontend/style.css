@@ -533,6 +533,32 @@ tbody tr:nth-child(even):hover {
 .stage95-summary-meta {
   margin-top: 10px;
 }
+.multi-strategy-panel {
+  margin-top: 10px;
+}
+.multi-strategy-table-wrap {
+  width: 100%;
+  overflow-x: auto;
+  margin-top: 10px;
+}
+.multi-strategy-table {
+  min-width: 760px;
+}
+.multi-strategy-table td {
+  vertical-align: top;
+}
+.multi-strategy-id {
+  margin-top: 2px;
+  font-size: 0.68rem;
+  color: var(--text-dim);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+.multi-strategy-weights {
+  max-width: 280px;
+  white-space: normal;
+  line-height: 1.45;
+  color: var(--text-dim);
+}
 
 @media (max-width: 640px) {
   .stage95-asset-head,
