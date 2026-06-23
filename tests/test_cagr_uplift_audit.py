@@ -93,3 +93,69 @@ def test_run_cash_proxy_uplift_audit_baseline_is_self_comparison():
     assert abs(row.real_cagr_delta) < 1e-12
     assert abs(row.real_mdd_delta) < 1e-12
     assert row.pass_mdd_guardrail is True
+
+
+def test_momentum_target_asset_defaults_to_cash_until_lookback():
+    dates = pd.bdate_range("2020-01-02", periods=260)
+    prices = pd.DataFrame(
+        {
+            "QQQ": [100.0 + i for i in range(len(dates))],
+            "GLD": [100.0] * len(dates),
+            "SHV": [100.0] * len(dates),
+        },
+        index=dates,
+    )
+
+    assert audit.momentum_target_asset(prices, dates[100]) == "SHV"
+    assert audit.momentum_target_asset(prices, dates[253]) == "QQQ"
+
+
+def test_momentum_target_asset_stays_cash_when_12m_return_is_negative():
+    dates = pd.bdate_range("2020-01-02", periods=260)
+    prices = pd.DataFrame(
+        {
+            "QQQ": [300.0 - i for i in range(len(dates))],
+            "GLD": [100.0] * len(dates),
+            "SHV": [100.0] * len(dates),
+        },
+        index=dates,
+    )
+
+    assert audit.momentum_target_asset(prices, dates[253]) == "SHV"
+
+
+def test_momentum_sleeve_runs_with_quarterly_rebalances():
+    dates = pd.bdate_range("2020-01-02", periods=520)
+    prices = pd.DataFrame(
+        {
+            "QQQ": [100.0 + i * 0.1 for i in range(len(dates))],
+            "GLD": [100.0 + i * 0.02 for i in range(len(dates))],
+            "SHV": [100.0 + i * 0.005 for i in range(len(dates))],
+        },
+        index=dates,
+    )
+
+    sleeve = audit.run_qqq_cash_momentum_sleeve_from_prices(prices)
+
+    assert sleeve.name == "gld_qqq_cash_12m_momentum"
+    assert sleeve.final > 100000.0
+    assert sleeve.rebalances >= 4
+    assert sleeve.total_cost >= 0.0
+
+
+def test_static_satellite_sleeve_rejects_bad_weights():
+    dates = pd.bdate_range("2020-01-02", periods=5)
+    prices = pd.DataFrame(
+        {
+            "QQQ": [100.0, 101.0, 102.0, 103.0, 104.0],
+            "GLD": [100.0, 100.5, 101.0, 101.5, 102.0],
+        },
+        index=dates,
+    )
+
+    with pytest.raises(ValueError, match="weights must sum"):
+        audit.run_static_satellite_sleeve_from_prices(
+            "bad",
+            prices,
+            {"QQQ": 0.4, "GLD": 0.4},
+        )

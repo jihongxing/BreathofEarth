@@ -1,0 +1,18 @@
+{
+  "snapshot": "2026-06-23-trend-satellite",
+  "source": "Yahoo Adj Close",
+  "created_at": "2026-06-23",
+  "policy": {
+    "purpose": "trend satellite CAGR uplift bypass audit input",
+    "routine_refresh_allowed": false,
+    "production_candidate_change": false
+  },
+  "tickers": {
+    "DBMF": {
+      "rows": 1755,
+      "start": "2019-05-08",
+      "end": "2026-04-30",
+      "sha256": "b33b421f421642870f02fe0f5dd976c6345cb6d57472d6a7a2f1153f30a227e5"
+    }
+  }
+}

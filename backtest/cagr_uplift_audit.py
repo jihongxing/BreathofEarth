@@ -1,10 +1,12 @@
 """
 CAGR uplift bypass audit.
 
-This first experiment tests cash-proxy replacement only. It keeps the audited
-90/10 topology, MA150 macro filter, acute shifter, recovery rules, and
-satellite size unchanged. The only variable is the price series used when the
-defensive core holds the SHV cash sleeve.
+This module keeps the audited 90/10 topology, MA150 macro filter, acute
+shifter, recovery rules, and satellite size unchanged. Experiments are isolated
+to bypass sleeves:
+
+- cash-proxy replacement for the defensive core's SHV price series
+- satellite-level trend/CTA replacement inside the fixed 10% satellite
 
 Short-history cash proxies are compared only on their own overlapping windows.
 Do not read a SGOV/USFR result as a 2005 full-cycle conclusion.
@@ -20,6 +22,7 @@ from pathlib import Path
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+import numpy as np
 import pandas as pd
 
 from backtest.fixed_policy_audit import load_prices
@@ -40,16 +43,20 @@ from backtest.return_attribution import (
     run_return_attribution,
     run_return_attribution_from_prices,
 )
-from engine.config import ASSETS
+from engine.config import ASSETS, FEE_RATE
 from engine.portfolio_aggregator import AggregatedPortfolio, aggregate_sleeves, calculate_cagr, calculate_mdd
 
 
 DATA_DIR = Path("data")
 RAW_DIR = DATA_DIR / "raw"
 CASH_PROXY_SNAPSHOT_DIR = DATA_DIR / "audit_snapshots" / "2026-06-23-cash-proxy"
+TREND_SNAPSHOT_DIR = DATA_DIR / "audit_snapshots" / "2026-06-23-trend-satellite"
 DEFAULT_START = "2005-01-03"
 DEFAULT_END = "2026-04-30"
 CASH_PROXY_TICKERS = ["SHV", "BIL", "SGOV", "USFR", "TFLO"]
+BASELINE_SATELLITE_WEIGHTS = {"QQQ": 0.40, "SPY": 0.30, "GLD": 0.30}
+DBMF_SATELLITE_WEIGHTS = {"QQQ": 0.40, "GLD": 0.30, "DBMF": 0.30}
+MOMENTUM_LOOKBACK_DAYS = 252
 BASE_REAL_WORLD_SCENARIO = RealWorldFrictionScenario(
     name="unlevered_base_case",
     dividend_withholding_drag_bps=55,
@@ -100,6 +107,36 @@ class CashProxyAuditRow:
     avg_cash_weight: float
     high_cash_day_pct: float
     max_daily_weight_shock: float
+    pass_mdd_guardrail: bool
+
+
+@dataclass(frozen=True)
+class TrendSatelliteAuditRow:
+    scenario: str
+    source: str
+    confidence: str
+    start: str
+    end: str
+    years: float
+    research_cagr: float
+    research_mdd: float
+    real_cagr: float
+    real_mdd: float
+    harsh_cagr: float
+    harsh_mdd: float
+    baseline_real_cagr: float
+    baseline_real_mdd: float
+    real_cagr_delta: float
+    real_mdd_delta: float
+    final_nav_delta: float
+    satellite_cagr: float
+    satellite_mdd: float
+    satellite_cost: float
+    satellite_rebalances: int
+    crisis_2008_return: float | None
+    crisis_2008_mdd: float | None
+    crisis_2022_return: float | None
+    crisis_2022_mdd: float | None
     pass_mdd_guardrail: bool
 
 
@@ -220,6 +257,48 @@ def save_cash_proxy_snapshot(
     return path
 
 
+def save_price_snapshot(
+    series: pd.Series,
+    snapshot_dir: Path,
+    purpose: str,
+) -> Path:
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+    path = snapshot_dir / f"{series.name}.csv"
+    frame = series.to_frame("adj_close")
+    frame.index.name = "date"
+    frame.to_csv(path)
+    write_price_snapshot_manifest(snapshot_dir, purpose=purpose)
+    return path
+
+
+def write_price_snapshot_manifest(snapshot_dir: Path, purpose: str) -> Path:
+    tickers: dict[str, dict] = {}
+    for path in sorted(snapshot_dir.glob("*.csv")):
+        df = pd.read_csv(path, index_col="date", parse_dates=True).sort_index()
+        column = "adj_close" if "adj_close" in df.columns else df.columns[0]
+        series = _validate_positive(df[column], path.stem, path)
+        tickers[path.stem] = {
+            "rows": int(len(series)),
+            "start": str(series.index.min().date()),
+            "end": str(series.index.max().date()),
+            "sha256": _sha256(path),
+        }
+    payload = {
+        "snapshot": snapshot_dir.name,
+        "source": "Yahoo Adj Close",
+        "created_at": date.today().isoformat(),
+        "policy": {
+            "purpose": purpose,
+            "routine_refresh_allowed": False,
+            "production_candidate_change": False,
+        },
+        "tickers": tickers,
+    }
+    manifest_path = snapshot_dir / "manifest.json"
+    manifest_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    return manifest_path
+
+
 def write_cash_proxy_manifest(snapshot_dir: Path = CASH_PROXY_SNAPSHOT_DIR) -> Path:
     tickers: dict[str, dict] = {}
     for path in sorted(snapshot_dir.glob("*.csv")):
@@ -264,6 +343,47 @@ def load_or_fetch_cash_proxy(
     series = download_cash_proxy(ticker)
     path = save_cash_proxy_snapshot(series, snapshot_dir=snapshot_dir)
     return series, str(path)
+
+
+def load_or_fetch_trend_asset(
+    ticker: str,
+    allow_download: bool = True,
+    snapshot_dir: Path = TREND_SNAPSHOT_DIR,
+) -> tuple[pd.Series, str]:
+    try:
+        series, source = load_cached_cash_proxy(ticker, snapshot_dir=snapshot_dir)
+        return series, source
+    except FileNotFoundError:
+        if not allow_download:
+            raise
+    series = download_cash_proxy(ticker)
+    path = save_price_snapshot(
+        series,
+        snapshot_dir,
+        purpose="trend satellite CAGR uplift bypass audit input",
+    )
+    return series, str(path)
+
+
+def load_satellite_series(
+    ticker: str,
+    allow_download: bool = True,
+    trend_snapshot_dir: Path = TREND_SNAPSHOT_DIR,
+) -> tuple[pd.Series, str]:
+    if ticker in {"SPY", "TLT", "GLD", "SHV"}:
+        prices = load_prices()
+        return _validate_positive(prices[ticker], ticker, "data/etf_daily.csv"), "data/etf_daily.csv"
+    if ticker in {"QQQ", "VTI", "SMH"}:
+        series, source = load_cached_cash_proxy(
+            ticker,
+            snapshot_dir=DATA_DIR / "audit_snapshots" / "2026-06-23-yahoo-adj-close",
+        )
+        return series, source
+    return load_or_fetch_trend_asset(
+        ticker,
+        allow_download=allow_download,
+        snapshot_dir=trend_snapshot_dir,
+    )
 
 
 def build_cash_proxy_prices(cash_proxy: pd.Series) -> pd.DataFrame:
@@ -373,6 +493,316 @@ def run_baseline_defensive_for_window(start: pd.Timestamp, end: pd.Timestamp) ->
     if prices.empty:
         raise ValueError(f"baseline prices have no overlap for {start.date()}..{end.date()}")
     return run_return_attribution_from_prices(prices)
+
+
+def build_satellite_prices(
+    tickers: list[str],
+    allow_download: bool = True,
+    trend_snapshot_dir: Path = TREND_SNAPSHOT_DIR,
+) -> tuple[pd.DataFrame, dict[str, str]]:
+    frames: dict[str, pd.Series] = {}
+    sources: dict[str, str] = {}
+    for ticker in tickers:
+        series, source = load_satellite_series(
+            ticker,
+            allow_download=allow_download,
+            trend_snapshot_dir=trend_snapshot_dir,
+        )
+        frames[ticker] = series
+        sources[ticker] = source
+    prices = pd.DataFrame(frames).sort_index().ffill().dropna(how="any")
+    prices = prices.loc[:DEFAULT_END, tickers]
+    if prices.empty:
+        raise ValueError(f"satellite price table has no overlap for {tickers}")
+    return prices, sources
+
+
+def run_static_satellite_sleeve_from_prices(
+    name: str,
+    prices: pd.DataFrame,
+    weights: dict[str, float],
+    initial_capital: float = INITIAL_CAPITAL,
+    fee_rate: float = FEE_RATE,
+) -> SleeveMetrics:
+    if abs(sum(weights.values()) - 1.0) > 1e-9:
+        raise ValueError(f"weights must sum to 1.0: {weights}")
+    tickers = list(weights)
+    prices = prices[tickers].sort_index().dropna(how="any")
+    if prices.empty:
+        raise ValueError(f"empty satellite price table for {name}")
+    returns = prices.pct_change().fillna(0.0)
+    target = np.array([weights[ticker] for ticker in tickers], dtype=float)
+    positions = target * initial_capital
+    nav_history: list[float] = []
+    total_cost = 0.0
+    rebalances = 0
+
+    for i, current_date in enumerate(prices.index):
+        positions = positions * (1.0 + returns.iloc[i].values)
+        nav = float(positions.sum())
+        is_year_end = (
+            i < len(prices.index) - 1
+            and prices.index[i].year != prices.index[i + 1].year
+        )
+        if is_year_end:
+            current_weights = positions / nav if nav > 0 else np.zeros(len(tickers))
+            turnover = float(np.sum(np.abs(current_weights - target)) / 2.0)
+            cost = nav * turnover * fee_rate
+            nav = max(nav - cost, 0.0)
+            positions = target * nav
+            total_cost += cost
+            rebalances += 1
+        nav_history.append(nav)
+
+    nav = pd.Series(nav_history, index=prices.index, name=name)
+    return SleeveMetrics(
+        name=name,
+        nav=nav,
+        cagr=calculate_cagr(nav),
+        mdd=calculate_mdd(nav),
+        final=float(nav.iloc[-1]),
+        total_cost=float(total_cost),
+        rebalances=rebalances,
+    )
+
+
+def run_static_satellite_sleeve(
+    name: str,
+    weights: dict[str, float],
+    start: pd.Timestamp | None = None,
+    end: pd.Timestamp | None = None,
+    allow_download: bool = True,
+    trend_snapshot_dir: Path = TREND_SNAPSHOT_DIR,
+) -> tuple[SleeveMetrics, dict[str, str]]:
+    prices, sources = build_satellite_prices(
+        list(weights),
+        allow_download=allow_download,
+        trend_snapshot_dir=trend_snapshot_dir,
+    )
+    if start is not None or end is not None:
+        prices = prices.loc[start:end]
+    return run_static_satellite_sleeve_from_prices(name, prices, weights), sources
+
+
+def momentum_target_asset(prices: pd.DataFrame, current_date: pd.Timestamp) -> str:
+    qqq = prices["QQQ"]
+    loc = qqq.index.get_loc(current_date)
+    if not isinstance(loc, int) or loc < MOMENTUM_LOOKBACK_DAYS:
+        return "SHV"
+    lookback_price = float(qqq.iloc[loc - MOMENTUM_LOOKBACK_DAYS])
+    if lookback_price <= 0:
+        return "SHV"
+    return "QQQ" if float(qqq.iloc[loc] / lookback_price - 1.0) > 0 else "SHV"
+
+
+def run_qqq_cash_momentum_sleeve_from_prices(
+    prices: pd.DataFrame,
+    name: str = "gld_qqq_cash_12m_momentum",
+    initial_capital: float = INITIAL_CAPITAL,
+    fee_rate: float = FEE_RATE,
+) -> SleeveMetrics:
+    tickers = ["GLD", "QQQ", "SHV"]
+    prices = prices[tickers].sort_index().dropna(how="any")
+    if prices.empty:
+        raise ValueError("empty momentum price table")
+    returns = prices.pct_change().fillna(0.0)
+
+    def target_for(day: pd.Timestamp) -> np.ndarray:
+        chosen = momentum_target_asset(prices, day)
+        weights = {"GLD": 0.50, "QQQ": 0.0, "SHV": 0.0}
+        weights[chosen] = 0.50
+        return np.array([weights[ticker] for ticker in tickers], dtype=float)
+
+    positions = target_for(prices.index[0]) * initial_capital
+    nav_history: list[float] = []
+    total_cost = 0.0
+    rebalances = 0
+
+    for i, current_date in enumerate(prices.index):
+        positions = positions * (1.0 + returns.iloc[i].values)
+        nav = float(positions.sum())
+        is_quarter_end = (
+            i < len(prices.index) - 1
+            and prices.index[i].quarter != prices.index[i + 1].quarter
+        )
+        if is_quarter_end:
+            target = target_for(current_date)
+            current_weights = positions / nav if nav > 0 else np.zeros(len(tickers))
+            turnover = float(np.sum(np.abs(current_weights - target)) / 2.0)
+            cost = nav * turnover * fee_rate
+            nav = max(nav - cost, 0.0)
+            positions = target * nav
+            total_cost += cost
+            rebalances += 1
+        nav_history.append(nav)
+
+    nav = pd.Series(nav_history, index=prices.index, name=name)
+    return SleeveMetrics(
+        name=name,
+        nav=nav,
+        cagr=calculate_cagr(nav),
+        mdd=calculate_mdd(nav),
+        final=float(nav.iloc[-1]),
+        total_cost=float(total_cost),
+        rebalances=rebalances,
+    )
+
+
+def run_qqq_cash_momentum_sleeve(
+    start: pd.Timestamp | None = None,
+    end: pd.Timestamp | None = None,
+    allow_download: bool = True,
+    trend_snapshot_dir: Path = TREND_SNAPSHOT_DIR,
+) -> tuple[SleeveMetrics, dict[str, str]]:
+    prices, sources = build_satellite_prices(
+        ["GLD", "QQQ", "SHV"],
+        allow_download=allow_download,
+        trend_snapshot_dir=trend_snapshot_dir,
+    )
+    if start is not None or end is not None:
+        prices = prices.loc[start:end]
+    return run_qqq_cash_momentum_sleeve_from_prices(prices), sources
+
+
+def aggregate_from_window_defensive_and_satellite(
+    satellite: SleeveMetrics,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+) -> AggregatedPortfolio:
+    defensive = _sleeve_from_attribution(
+        "window_defensive",
+        run_baseline_defensive_for_window(start, end),
+    )
+    return aggregate_sleeves(
+        {"defensive": defensive.nav, "beta": satellite.nav},
+        PRODUCTION_SLEEVE_WEIGHTS,
+        initial_capital=INITIAL_CAPITAL,
+    )
+
+
+def _period_return_and_mdd(nav: pd.Series, start: str, end: str) -> tuple[float, float] | None:
+    sliced = nav.loc[start:end].dropna()
+    if len(sliced) < 2:
+        return None
+    period_return = float(sliced.iloc[-1] / sliced.iloc[0] - 1.0)
+    period_mdd = calculate_mdd(sliced)
+    return period_return, period_mdd
+
+
+def evaluate_trend_satellite(
+    scenario: str,
+    satellite: SleeveMetrics,
+    baseline_satellite: SleeveMetrics,
+    sources: dict[str, str],
+    confidence: str,
+) -> TrendSatelliteAuditRow:
+    start = max(satellite.nav.index.min(), baseline_satellite.nav.index.min())
+    end = min(satellite.nav.index.max(), baseline_satellite.nav.index.max())
+    candidate_research = aggregate_from_window_defensive_and_satellite(satellite, start, end)
+    baseline_research = aggregate_from_window_defensive_and_satellite(baseline_satellite, start, end)
+    research_slice = _slice_nav(candidate_research.nav, start, end)
+    baseline_research_slice = _slice_nav(baseline_research.nav, start, end)
+    real_nav = apply_real_world_friction(research_slice, BASE_REAL_WORLD_SCENARIO)
+    harsh_nav = apply_real_world_friction(research_slice, HARSH_REAL_WORLD_SCENARIO)
+    baseline_real_nav = apply_real_world_friction(
+        baseline_research_slice,
+        BASE_REAL_WORLD_SCENARIO,
+    )
+    real_cagr = calculate_cagr(real_nav)
+    real_mdd = calculate_mdd(real_nav)
+    baseline_real_cagr = calculate_cagr(baseline_real_nav)
+    baseline_real_mdd = calculate_mdd(baseline_real_nav)
+    harsh_mdd = calculate_mdd(harsh_nav)
+    crisis_2008 = _period_return_and_mdd(real_nav, "2008-01-01", "2008-12-31")
+    crisis_2022 = _period_return_and_mdd(real_nav, "2022-01-01", "2022-12-31")
+    source_note = "; ".join(f"{ticker}:{source}" for ticker, source in sorted(sources.items()))
+
+    return TrendSatelliteAuditRow(
+        scenario=scenario,
+        source=source_note,
+        confidence=confidence,
+        start=start.strftime("%Y-%m-%d"),
+        end=end.strftime("%Y-%m-%d"),
+        years=_years(research_slice.index),
+        research_cagr=calculate_cagr(research_slice),
+        research_mdd=calculate_mdd(research_slice),
+        real_cagr=real_cagr,
+        real_mdd=real_mdd,
+        harsh_cagr=calculate_cagr(harsh_nav),
+        harsh_mdd=harsh_mdd,
+        baseline_real_cagr=baseline_real_cagr,
+        baseline_real_mdd=baseline_real_mdd,
+        real_cagr_delta=real_cagr - baseline_real_cagr,
+        real_mdd_delta=real_mdd - baseline_real_mdd,
+        final_nav_delta=float(real_nav.iloc[-1] - baseline_real_nav.iloc[-1]),
+        satellite_cagr=satellite.cagr,
+        satellite_mdd=satellite.mdd,
+        satellite_cost=satellite.total_cost,
+        satellite_rebalances=satellite.rebalances,
+        crisis_2008_return=crisis_2008[0] if crisis_2008 is not None else None,
+        crisis_2008_mdd=crisis_2008[1] if crisis_2008 is not None else None,
+        crisis_2022_return=crisis_2022[0] if crisis_2022 is not None else None,
+        crisis_2022_mdd=crisis_2022[1] if crisis_2022 is not None else None,
+        pass_mdd_guardrail=(real_mdd >= baseline_real_mdd and harsh_mdd >= -0.17),
+    )
+
+
+def run_trend_satellite_uplift_audit(
+    allow_download: bool = True,
+    trend_snapshot_dir: Path = TREND_SNAPSHOT_DIR,
+) -> list[TrendSatelliteAuditRow]:
+    rows: list[TrendSatelliteAuditRow] = []
+
+    dbmf_satellite, dbmf_sources = run_static_satellite_sleeve(
+        "qqq_gld_dbmf",
+        DBMF_SATELLITE_WEIGHTS,
+        allow_download=allow_download,
+        trend_snapshot_dir=trend_snapshot_dir,
+    )
+    dbmf_start = dbmf_satellite.nav.index.min()
+    dbmf_end = dbmf_satellite.nav.index.max()
+    dbmf_baseline, _ = run_static_satellite_sleeve(
+        "baseline_qqq_spy_gld_dbmf_window",
+        BASELINE_SATELLITE_WEIGHTS,
+        start=dbmf_start,
+        end=dbmf_end,
+        allow_download=allow_download,
+        trend_snapshot_dir=trend_snapshot_dir,
+    )
+    rows.append(
+        evaluate_trend_satellite(
+            "qqq_gld_dbmf",
+            dbmf_satellite,
+            dbmf_baseline,
+            dbmf_sources,
+            confidence="LOW_SHORT_HISTORY",
+        )
+    )
+
+    momentum_satellite, momentum_sources = run_qqq_cash_momentum_sleeve(
+        allow_download=allow_download,
+        trend_snapshot_dir=trend_snapshot_dir,
+    )
+    momentum_start = momentum_satellite.nav.index.min()
+    momentum_end = momentum_satellite.nav.index.max()
+    momentum_baseline, _ = run_static_satellite_sleeve(
+        "baseline_qqq_spy_gld_full_window",
+        BASELINE_SATELLITE_WEIGHTS,
+        start=momentum_start,
+        end=momentum_end,
+        allow_download=allow_download,
+        trend_snapshot_dir=trend_snapshot_dir,
+    )
+    rows.append(
+        evaluate_trend_satellite(
+            "gld_qqq_cash_12m_momentum",
+            momentum_satellite,
+            momentum_baseline,
+            momentum_sources,
+            confidence="FULL_WINDOW_RULE_BASED",
+        )
+    )
+    return rows
 
 
 def evaluate_cash_proxy(
@@ -489,9 +919,47 @@ def print_report(rows: list[CashProxyAuditRow]) -> None:
     print("=" * 172)
 
 
+def _fmt_optional(value: float | None, percentage: bool = True) -> str:
+    if value is None:
+        return "N/A"
+    return f"{value:.2%}" if percentage else f"{value:,.2f}"
+
+
+def print_trend_report(rows: list[TrendSatelliteAuditRow]) -> None:
+    print("\n" + "=" * 172)
+    print("  CAGR Uplift Audit: Satellite-Level CTA / Trend Following")
+    print("=" * 172)
+    print("  Boundary: total satellite remains 10%; defensive core and Stage 9.5 are unchanged.")
+    print("  DBMF is short-history and cannot be read as a 2005 full-cycle conclusion.")
+    print("-" * 172)
+    print(
+        f"  {'Scenario':<28} {'Confidence':<22} {'Window':<23} {'Years':>5} "
+        f"{'Real CAGR':>10} {'Real MDD':>9} {'Base CAGR':>10} {'Base MDD':>9} "
+        f"{'CAGR Δ':>8} {'MDD Δ':>8} {'2022 Ret':>9} {'2022 MDD':>9} {'Verdict':>9}"
+    )
+    for row in rows:
+        verdict = "PASS" if row.pass_mdd_guardrail and row.real_cagr_delta > 0 else "WATCH"
+        print(
+            f"  {row.scenario:<28} {row.confidence:<22} {row.start}..{row.end:<10} "
+            f"{row.years:>5.1f} {row.real_cagr:>9.2%} {row.real_mdd:>8.2%} "
+            f"{row.baseline_real_cagr:>9.2%} {row.baseline_real_mdd:>8.2%} "
+            f"{row.real_cagr_delta:>7.2%} {row.real_mdd_delta:>7.2%} "
+            f"{_fmt_optional(row.crisis_2022_return):>9} {_fmt_optional(row.crisis_2022_mdd):>9} "
+            f"{verdict:>9}"
+        )
+    print("-" * 172)
+    print("  Guardrail:")
+    print("  - PASS requires same-window real-world MDD no worse than baseline and harsh MDD >= -17%.")
+    print("  - Short-history CTA proxy results must remain downgraded until a long-history proxy exists.")
+    print("  - A trend sleeve cannot increase the total satellite above 10%.")
+    print("=" * 172)
+
+
 def main() -> None:
-    rows = run_cash_proxy_uplift_audit()
-    print_report(rows)
+    cash_rows = run_cash_proxy_uplift_audit()
+    print_report(cash_rows)
+    trend_rows = run_trend_satellite_uplift_audit()
+    print_trend_report(trend_rows)
 
 
 if __name__ == "__main__":
