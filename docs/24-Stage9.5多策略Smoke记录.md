@@ -60,8 +60,53 @@ Stage 9.5 多策略影子审计平台第一版链路可运行：
 Research PASS / Production design APPROVED / Live leveraged execution NOT YET APPROVED
 ```
 
+## 2026-06-23 前端浏览器验证
+
+临时 QA 服务：
+
+```bash
+python -m uvicorn output.multi_strategy_frontend_qa_server:app --host 127.0.0.1 --port 8765
+```
+
+验证方式：
+
+- 使用 QA-only FastAPI 服务，不启动正式数据调度器。
+- 使用 Playwright 打开 `http://127.0.0.1:8765/`。
+- 登录 QA mock 前端。
+- 关闭家训阅读弹窗后等待 `#stage95-shadow-audit .stage95-card` 渲染。
+- 检查 Stage 9.5 多策略面板文本、控制面和移动端布局。
+- 用户完成手动页面验收并确认当前效果满意。
+
+自动断言结果：
+
+| 检查项 | 结果 |
+|--------|------|
+| 显示多策略影子观察标题 | PASS |
+| 显示 `ATTENTION / 需人工关注` | PASS |
+| 显示 `NOT_APPROVED / 未批准` | PASS |
+| 显示 `UNAVAILABLE` | PASS |
+| 显示 `production_90_10` | PASS |
+| 显示只读提示 | PASS |
+| Stage 9.5 面板内控制面数量 | `0` |
+| 移动端 `innerWidth` | `390` |
+| 移动端 `scrollWidth` | `390` |
+| 移动端横向溢出 | PASS，无横向溢出 |
+
+截图产物：
+
+- `output/playwright/multi-strategy-stage95-desktop-fixed.png`
+- `output/playwright/multi-strategy-stage95-mobile-fixed.png`
+
+这些截图属于 ignored `output/` 下的本地 QA 产物，不提交仓库。
+
+已修复的问题：
+
+- 首轮移动端截图发现页面横向溢出。
+- 根因是顶部导航和部分 Stage 9.5 卡片/grid 的最小宽度共同撑宽页面。
+- 已通过 PR #12 修复移动端收缩规则、多策略表格容器和家训弹窗移动端可见性。
+
 下一步：
 
-1. 用本地临时 API 服务加载 `data/shadow/latest_multi_strategy_shadow.json`。
-2. 在浏览器中验证 Stage 9.5 多策略面板显示 `ATTENTION / UNAVAILABLE / NOT_APPROVED`。
-3. 若前端显示一致，再进入真实券商只读环境的多策略观察准备，但继续禁止订单提交。
+1. 保持 Stage 9.5 多策略面板只读，不增加交易、杠杆或 Shadow 转 Live 控件。
+2. 准备真实券商只读环境下的多策略 shadow 观察，但继续禁止订单提交。
+3. 若接入真实 L1/L2 或保证金快照，先更新 runner/API 测试，再更新前端显示。
