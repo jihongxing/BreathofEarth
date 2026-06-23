@@ -106,6 +106,13 @@ flowchart TD
 
 这说明当前 90/10 候选更适合定义为防御底座，而不是已经满足高净后收益目标的完整实盘系统。细节见 [真实摩擦压力审计](D:/codeSpace/BreathofEarth/docs/20-%E7%9C%9F%E5%AE%9E%E6%91%A9%E6%93%A6%E5%8E%8B%E5%8A%9B%E5%AE%A1%E8%AE%A1.md)。
 
+Benchmark 对比必须使用双口径：
+
+- 研究口径：`research_current`
+- 真实摩擦基础口径：`unlevered_base_case`
+
+当前结论是：真实摩擦口径下，候选系统收益低于 `VBIAX / PRPFX`，但最大回撤显著更浅；在 `RPAR` 的较短历史窗口内，收益与回撤均占优。细节见 [Benchmark 对比审计](D:/codeSpace/BreathofEarth/docs/21-Benchmark%E5%AF%B9%E6%AF%94%E5%AE%A1%E8%AE%A1.md)。
+
 数据文件治理：
 
 - `data/raw/*.csv` 是可再生成的本地缓存，默认不作为普通 PR 审计输入提交。
@@ -271,6 +278,7 @@ BreathofEarth/
 - [Stage 9.5 影子观察运行手册](D:/codeSpace/BreathofEarth/docs/16-Stage9.5%E5%BD%B1%E5%AD%90%E8%A7%82%E5%AF%9F%E8%BF%90%E8%A1%8C%E6%89%8B%E5%86%8C.md)
 - [IBKR 只读接入清单](D:/codeSpace/BreathofEarth/docs/19-IBKR%E5%8F%AA%E8%AF%BB%E6%8E%A5%E5%85%A5%E6%B8%85%E5%8D%95.md)
 - [真实摩擦压力审计](D:/codeSpace/BreathofEarth/docs/20-%E7%9C%9F%E5%AE%9E%E6%91%A9%E6%93%A6%E5%8E%8B%E5%8A%9B%E5%AE%A1%E8%AE%A1.md)
+- [Benchmark 对比审计](D:/codeSpace/BreathofEarth/docs/21-Benchmark%E5%AF%B9%E6%AF%94%E5%AE%A1%E8%AE%A1.md)
 
 ## 一句话总结
 
