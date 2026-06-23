@@ -32,6 +32,7 @@ from api.routes.alpha_routes import router as alpha_router
 from api.routes.data_routes import router as data_router
 from api.routes.report_routes import router as report_router
 from api.routes.shadow_audit_routes import router as shadow_audit_router
+from api.routes.strategy_audit_routes import router as strategy_audit_router
 
 
 @asynccontextmanager
@@ -81,6 +82,7 @@ app.include_router(alpha_router)
 app.include_router(data_router)
 app.include_router(report_router)
 app.include_router(shadow_audit_router)
+app.include_router(strategy_audit_router)
 
 # 静态文件（前端）
 FRONTEND_DIR = Path(__file__).parent / "frontend"
