@@ -62,5 +62,5 @@ python -m uvicorn output.stage95_frontend_qa_server:app --host 127.0.0.1 --port 
 下一步：
 
 1. 推送当前文档与 QA 记录提交。
-2. 准备真实 IBKR 只读接入的环境变量和凭证清单。
+2. 按 [IBKR 只读接入清单](D:/codeSpace/BreathofEarth/docs/19-IBKR%E5%8F%AA%E8%AF%BB%E6%8E%A5%E5%85%A5%E6%B8%85%E5%8D%95.md) 准备真实 IBKR 只读接入的环境变量和凭证。
 3. 在真实只读环境下重复 Stage 9.5 smoke，但继续禁止订单提交。

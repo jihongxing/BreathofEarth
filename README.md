@@ -231,6 +231,7 @@ BreathofEarth/
 - [家族办公室平台化规划](D:/codeSpace/BreathofEarth/docs/14-%E5%AE%B6%E6%97%8F%E5%8A%9E%E5%85%AC%E5%AE%A4%E5%B9%B3%E5%8F%B0%E5%8C%96%E8%A7%84%E5%88%92.md)
 - [生产候选方案与后续开发指南](D:/codeSpace/BreathofEarth/docs/15-%E7%94%9F%E4%BA%A7%E5%80%99%E9%80%89%E6%96%B9%E6%A1%88%E4%B8%8E%E5%90%8E%E7%BB%AD%E5%BC%80%E5%8F%91%E6%8C%87%E5%8D%97.md)
 - [Stage 9.5 影子观察运行手册](D:/codeSpace/BreathofEarth/docs/16-Stage9.5%E5%BD%B1%E5%AD%90%E8%A7%82%E5%AF%9F%E8%BF%90%E8%A1%8C%E6%89%8B%E5%86%8C.md)
+- [IBKR 只读接入清单](D:/codeSpace/BreathofEarth/docs/19-IBKR%E5%8F%AA%E8%AF%BB%E6%8E%A5%E5%85%A5%E6%B8%85%E5%8D%95.md)
 
 ## 一句话总结
 

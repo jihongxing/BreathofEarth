@@ -211,5 +211,5 @@ python -m live.stage95_shadow_runner --aum 2000000 --broker ibkr
 当前最合理的后续任务：
 
 1. 用本手册跑一次本地离线 smoke cycle，确认 `data/shadow/latest_*` 报告和前端显示一致。
-2. 为真实 IBKR 只读接入准备环境变量和凭证清单，但不启用订单提交。
+2. 按 [IBKR 只读接入清单](D:/codeSpace/BreathofEarth/docs/19-IBKR%E5%8F%AA%E8%AF%BB%E6%8E%A5%E5%85%A5%E6%B8%85%E5%8D%95.md) 准备环境变量和凭证，但不启用订单提交。
 3. 连续 60 个交易日执行 Stage 9.5 观察，再进入人工评审。
