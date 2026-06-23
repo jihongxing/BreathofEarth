@@ -311,6 +311,7 @@ BreathofEarth/
 - [真实摩擦压力审计](D:/codeSpace/BreathofEarth/docs/20-%E7%9C%9F%E5%AE%9E%E6%91%A9%E6%93%A6%E5%8E%8B%E5%8A%9B%E5%AE%A1%E8%AE%A1.md)
 - [Benchmark 对比审计](D:/codeSpace/BreathofEarth/docs/21-Benchmark%E5%AF%B9%E6%AF%94%E5%AE%A1%E8%AE%A1.md)
 - [CAGR 提升研究计划](D:/codeSpace/BreathofEarth/docs/22-CAGR%E6%8F%90%E5%8D%87%E7%A0%94%E7%A9%B6%E8%AE%A1%E5%88%92.md)
+- [多策略影子审计平台设计](D:/codeSpace/BreathofEarth/docs/23-%E5%A4%9A%E7%AD%96%E7%95%A5%E5%BD%B1%E5%AD%90%E5%AE%A1%E8%AE%A1%E5%B9%B3%E5%8F%B0%E8%AE%BE%E8%AE%A1.md)
 
 ## 一句话总结
 
