@@ -165,7 +165,7 @@ python -m live.stage95_observation_summary --shadow-dir data/shadow --expected-c
 
 第一条命令会写出 `latest_shadow_sync.json`、`latest_margin_snapshot.json` 与 `latest_stage95_cycle.json`。第二条命令会生成 `latest_stage95_observation_summary.json`，汇总 60 日观察覆盖率、券商不可用次数、滑点和保证金字段覆盖率。`margin_monitor` 在券商不可达或保证金字段缺失时必须返回 `UNAVAILABLE`，不能推导安全结论。
 
-Stage 9.5 的 FastAPI 只读接口与前端面板已经接入。缺失、过期、不可解析、券商不可达或保证金字段缺失的报告必须显示为需要关注，不能被渲染成安全状态。该面板不提供交易、加杠杆或 Shadow 转 Live 的入口。
+Stage 9.5 的 FastAPI 只读接口与前端面板已经接入。`/api/stage95-admission/{portfolio_id}` 会把最新影子账本、保证金快照和 60 日观察汇总合成为生产准入门禁，只返回 `NOT_APPROVED` 或 `READY_FOR_HUMAN_REVIEW`。后者只代表证据链足够进入人工评审，不代表实盘、杠杆或下单获批。缺失、过期、不可解析、券商不可达或保证金字段缺失的报告必须显示为需要关注，不能被渲染成安全状态。该面板不提供交易、加杠杆或 Shadow 转 Live 的入口。
 
 ## 运行边界
 

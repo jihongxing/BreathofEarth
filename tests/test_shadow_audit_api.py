@@ -298,3 +298,106 @@ def test_stage95_observation_summary_api_requires_login_and_returns_readonly_pay
     finally:
         client.close()
         db_path.unlink(missing_ok=True)
+
+
+def test_build_stage95_admission_payload_blocks_missing_evidence(tmp_path):
+    payload = shadow_audit_routes.build_stage95_admission_payload("us", shadow_dir=tmp_path)
+
+    assert payload["status"] == "NOT_APPROVED"
+    assert payload["requires_attention"] is True
+    assert payload["live_leverage_approved"] is False
+    assert payload["human_review_required"] is True
+    assert payload["readonly"] is True
+    blocker_codes = {item["code"] for item in payload["blockers"]}
+    assert "latest_shadow_audit_healthy" in blocker_codes
+    assert "observation_window_complete" in blocker_codes
+    assert "margin_fields_complete" in blocker_codes
+
+
+def test_build_stage95_admission_payload_ready_for_human_review_when_evidence_is_complete(tmp_path):
+    timestamp = "2026-06-23T10:00:00Z"
+    (tmp_path / "latest_shadow_sync.json").write_text(
+        json.dumps(
+            {
+                "timestamp": timestamp,
+                "status": "OK",
+                "requires_attention": False,
+                "warnings": [],
+                "shadow_orders": [],
+                "target_weights": {"SPY": 0.255, "TLT": 0.225, "GLD": 0.255, "SHV": 0.225, "QQQ": 0.04},
+                "trading_disabled": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "latest_margin_snapshot.json").write_text(
+        json.dumps(
+            {
+                "timestamp": timestamp,
+                "status": "OBSERVED",
+                "requires_attention": False,
+                "warnings": [],
+                "margin_fields": {
+                    "NetLiquidation": {"value": 2_000_000},
+                    "ExcessLiquidity": {"value": 1_800_000},
+                    "FullMaintainMarginReq": {"value": 200_000},
+                },
+                "trading_disabled": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "latest_stage95_observation_summary.json").write_text(
+        json.dumps(
+            {
+                "generated_at": timestamp,
+                "status": "OBSERVED",
+                "requires_attention": False,
+                "expected_cycles": 60,
+                "observed_cycles": 60,
+                "coverage_ratio": 1.0,
+                "latest_is_stale": False,
+                "stale_gap_count": 0,
+                "critical_cycles": 0,
+                "broker_unavailable_cycles": 0,
+                "margin_field_coverage": {
+                    "required_fields": ["NetLiquidation", "ExcessLiquidity", "FullMaintainMarginReq"],
+                    "all_required_cycles": 60,
+                    "all_required_ratio": 1.0,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    payload = shadow_audit_routes.build_stage95_admission_payload(
+        "us",
+        shadow_dir=tmp_path,
+        now=datetime(2026, 6, 23, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert payload["status"] == "READY_FOR_HUMAN_REVIEW"
+    assert payload["level"] == "healthy"
+    assert payload["blockers"] == []
+    assert payload["live_leverage_approved"] is False
+    assert payload["human_review_required"] is True
+    assert all(check["passed"] for check in payload["checks"])
+
+
+def test_stage95_admission_api_requires_login_and_returns_readonly_gate(monkeypatch, tmp_path):
+    monkeypatch.setattr(shadow_audit_routes, "DEFAULT_SHADOW_DIR", tmp_path)
+    client, db_path, headers = _client_with_admin()
+    try:
+        unauthorized = client.get("/api/stage95-admission/us")
+        assert unauthorized.status_code == 401
+
+        response = client.get("/api/stage95-admission/us", headers=headers)
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["status"] == "NOT_APPROVED"
+        assert body["live_leverage_approved"] is False
+        assert body["readonly"] is True
+        assert body["shadow_audit"]["components"]["shadow_sync"]["requires_attention"] is True
+    finally:
+        client.close()
+        db_path.unlink(missing_ok=True)
