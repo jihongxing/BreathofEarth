@@ -31,6 +31,7 @@ from engine.config import ASSETS
 
 DATA_DIR = Path("data")
 RAW_DIR = DATA_DIR / "raw"
+AUDIT_SNAPSHOT_DIR = DATA_DIR / "audit_snapshots" / "2026-06-23-yahoo-adj-close"
 BASELINE_FILE = DATA_DIR / "etf_daily.csv"
 BOND_SCENARIOS = {
     "TLT baseline": "TLT",
@@ -56,8 +57,11 @@ class BondScenarioResult:
 def load_raw_series(ticker: str) -> pd.Series:
     path = RAW_DIR / f"{ticker}.csv"
     if not path.exists():
+        path = AUDIT_SNAPSHOT_DIR / f"{ticker}.csv"
+    if not path.exists():
         raise FileNotFoundError(
-            f"Missing raw data for {ticker}: {path}. Run data_manager/Yahoo fetch first."
+            f"Missing raw or audit snapshot data for {ticker}. "
+            f"Run data_manager/Yahoo fetch first or restore {AUDIT_SNAPSHOT_DIR}."
         )
     df = pd.read_csv(path, index_col="date", parse_dates=True).sort_index()
     col = "adj_close" if "adj_close" in df.columns else df.columns[0]

@@ -26,6 +26,7 @@ from engine.portfolio_aggregator import AggregatedPortfolio, aggregate_sleeves
 INITIAL_CAPITAL = 100000.0
 DATA_DIR = Path("data")
 RAW_DIR = DATA_DIR / "raw"
+AUDIT_SNAPSHOT_DIR = DATA_DIR / "audit_snapshots" / "2026-06-23-yahoo-adj-close"
 BASELINE_FILE = DATA_DIR / "etf_daily.csv"
 
 
@@ -77,7 +78,11 @@ def load_raw_series(ticker: str) -> pd.Series:
 
     path = RAW_DIR / f"{ticker}.csv"
     if not path.exists():
-        raise FileNotFoundError(f"missing raw data for {ticker}: {path}")
+        path = AUDIT_SNAPSHOT_DIR / f"{ticker}.csv"
+    if not path.exists():
+        raise FileNotFoundError(
+            f"missing raw or audit snapshot data for {ticker}: {RAW_DIR / f'{ticker}.csv'}"
+        )
     df = pd.read_csv(path, index_col="date", parse_dates=True).sort_index()
     col = "adj_close" if "adj_close" in df.columns else df.columns[0]
     series = pd.to_numeric(df[col], errors="coerce").dropna()

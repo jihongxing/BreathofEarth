@@ -43,6 +43,9 @@ All price data must fail closed:
 - Do not use AkShare US `qfq` prices for long-horizon US ETF backtests.
 - Non-positive prices, empty series, stale market dates, or mismatched assets must stop the run.
 - Keep source and as-of metadata in live/shadow outputs.
+- Treat `data/raw/*.csv` as regenerable local cache, not ordinary review input.
+- Commit only approved frozen research inputs under `data/audit_snapshots/<date>-<source>/`.
+- Every frozen snapshot must include a local `manifest.json`; `data/data_manifest.json` and `data/data_status.json` track regenerable raw cache metadata.
 
 ## Execution Boundary
 

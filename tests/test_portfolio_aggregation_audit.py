@@ -1,4 +1,8 @@
+import pandas as pd
+
+import backtest.portfolio_aggregation_audit as aggregation_audit
 from backtest.portfolio_aggregation_audit import (
+    load_raw_series,
     run_allocation_grid,
     run_portfolio_aggregation_audit,
 )
@@ -26,3 +30,23 @@ def test_allocation_grid_finds_small_beta_passing_configuration():
 
     assert qqq_spy_10.pass_target is True
     assert qqq_spy_20.pass_target is False
+
+
+def test_load_raw_series_falls_back_to_frozen_audit_snapshot(tmp_path, monkeypatch):
+    raw_dir = tmp_path / "raw"
+    snapshot_dir = tmp_path / "snapshot"
+    raw_dir.mkdir()
+    snapshot_dir.mkdir()
+    frame = pd.DataFrame(
+        {"adj_close": [200.0, 202.0]},
+        index=pd.to_datetime(["2026-01-02", "2026-01-05"]),
+    )
+    frame.index.name = "date"
+    frame.to_csv(snapshot_dir / "QQQ.csv")
+
+    monkeypatch.setattr(aggregation_audit, "RAW_DIR", raw_dir)
+    monkeypatch.setattr(aggregation_audit, "AUDIT_SNAPSHOT_DIR", snapshot_dir)
+
+    series = load_raw_series("QQQ")
+
+    assert series.tolist() == [200.0, 202.0]

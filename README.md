@@ -68,6 +68,12 @@
 - 生产设计：`APPROVED`
 - 实盘杠杆执行：`NOT YET APPROVED`
 
+数据文件治理：
+
+- `data/raw/*.csv` 是可再生成的本地缓存，默认不作为普通 PR 审计输入提交。
+- 已批准的研究复现输入放在 `data/audit_snapshots/<date>-<source>/`。
+- `data/data_manifest.json` / `data/data_status.json` 记录本地 raw 缓存状态；冻结快照目录必须自带 `manifest.json`，记录行数、日期范围和 SHA256。
+
 最终候选拓扑：
 
 - 90% 防御核心：`SPY / TLT / GLD / SHV`

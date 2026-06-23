@@ -26,6 +26,8 @@ db/backups/
 data/etf_daily.csv
 data/cpi_monthly.csv
 data/monthly_aligned.csv
+data/raw/*.csv
+!data/audit_snapshots/**/*.csv
 # 注意：data/live_*.csv 和 data/last_update.txt 不排除，它们是数据管道的一部分
 data/data_fetch_state.json
 
