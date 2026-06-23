@@ -65,7 +65,16 @@ class WithdrawalGovernance:
         return self._latest_insurance_authority(portfolio_id)[0]
 
     def request_withdrawal(
-        self, amount: float, reason: str, requester: str, portfolio_id: str = "us"
+        self,
+        amount: float,
+        reason: str,
+        requester: str,
+        portfolio_id: str = "us",
+        account_id: str | None = None,
+        member_id: str | None = None,
+        requested_by_user_id: int | None = None,
+        source_pool_id: str | None = None,
+        currency: str = "USD",
     ) -> GovernanceResult:
         """
         发起出金请求。
@@ -83,30 +92,84 @@ class WithdrawalGovernance:
                 reasons=authority.reasons,
             )
 
+        source_pool_id = source_pool_id or portfolio_id
+        shares_requested = 0.0
+        share_price = None
+        if account_id:
+            account = self.db.get_capital_account(account_id)
+            if account is None:
+                return GovernanceResult("ERROR", message="资产账户不存在")
+            member_id = member_id or account.get("member_id")
+            pool = self.db.ensure_investment_pool(source_pool_id, portfolio_id=portfolio_id)
+            share_price = float(pool.get("share_price") or 0.0)
+            if share_price <= 0:
+                return GovernanceResult("ERROR", message="投资池份额净值无效，不能发起出金")
+            position = self.db.get_account_pool_position(account_id, source_pool_id)
+            reserved = self.db.get_reserved_withdrawal_shares(account_id, source_pool_id)
+            available_shares = round(float(position.get("shares") or 0.0) - reserved, 8)
+            shares_requested = round(float(amount) / share_price, 8)
+            if shares_requested > available_shares + 1e-8:
+                return GovernanceResult(
+                    "ERROR",
+                    message="账户可赎回份额不足",
+                    account_id=account_id,
+                    source_pool_id=source_pool_id,
+                    requested_shares=shares_requested,
+                    available_shares=max(0.0, available_shares),
+                    share_price=share_price,
+                )
+
         withdrawal_id = str(uuid.uuid4())[:8]
         needs_multisig = amount >= MULTISIG_THRESHOLD
         cooling = COOLING_DAYS if needs_multisig else 0
         required_approvals = REQUIRED_APPROVALS if needs_multisig else SMALL_WITHDRAWAL_APPROVALS
         expires_at = (datetime.now() + timedelta(days=cooling + REQUEST_EXPIRY_DAYS)).strftime("%Y-%m-%d")
 
-        self.db.create_withdrawal_request(
-            withdrawal_id=withdrawal_id,
-            amount=amount,
-            reason=reason,
-            requester=requester,
-            expires_at=expires_at,
-            portfolio_id=portfolio_id,
-            required_approvals=required_approvals,
-            cooling_days=cooling,
-        )
-
-        self.db.save_audit_log(
-            "WITHDRAW_REQUEST", requester,
-            (
-                f"发起出金 ${amount:,.2f}，组合: {portfolio_id}，原因: {reason} "
-                f"| InsuranceDecision={insurance_decision_id}"
-            ),
-        )
+        with self.db.transaction() as conn:
+            self.db.create_withdrawal_request(
+                withdrawal_id=withdrawal_id,
+                amount=amount,
+                reason=reason,
+                requester=requester,
+                expires_at=expires_at,
+                portfolio_id=portfolio_id,
+                required_approvals=required_approvals,
+                cooling_days=cooling,
+                account_id=account_id,
+                member_id=member_id,
+                requested_by_user_id=requested_by_user_id,
+                source_pool_id=source_pool_id,
+                currency=currency,
+                shares_requested=shares_requested,
+                share_price=share_price,
+                conn=conn,
+            )
+            request_entry = None
+            if account_id:
+                request_entry = self.db.record_ledger_entry(
+                    account_id=account_id,
+                    portfolio_id=portfolio_id,
+                    pool_id=source_pool_id,
+                    entry_type="WITHDRAWAL_REQUESTED",
+                    amount=amount,
+                    currency=currency,
+                    shares_delta=-shares_requested,
+                    share_price=share_price,
+                    actor=requester,
+                    source_ref_type="withdrawal_request",
+                    source_ref_id=withdrawal_id,
+                    memo="出金申请已提交，份额仅作审批占用，不改变账户持仓",
+                    conn=conn,
+                )
+            self.db.save_audit_log(
+                "WITHDRAW_REQUEST", requester,
+                (
+                    f"发起出金 ${amount:,.2f}，账户: {account_id or '-'}，组合: {portfolio_id}，"
+                    f"份额: {shares_requested:,.8f}，原因: {reason} "
+                    f"| InsuranceDecision={insurance_decision_id}"
+                ),
+                conn=conn,
+            )
 
         if needs_multisig:
             logger.info(f"大额出金 ${amount:,.2f} 需要多签 (#{withdrawal_id})")
@@ -130,10 +193,21 @@ class WithdrawalGovernance:
             required_approvals=required_approvals,
             cooling_days=cooling,
             expires_at=expires_at,
+            account_id=account_id,
+            source_pool_id=source_pool_id,
+            shares_requested=shares_requested,
+            share_price=share_price,
+            ledger_entry_id=request_entry["id"] if account_id and request_entry else None,
         )
 
     def approve_withdrawal(
-        self, withdrawal_id: str, approver: str, decision: str = "APPROVED", comment: str = ""
+        self,
+        withdrawal_id: str,
+        approver: str,
+        decision: str = "APPROVED",
+        comment: str = "",
+        approver_user_id: int | None = None,
+        approver_role: str | None = None,
     ) -> GovernanceResult:
         """
         审批出金请求。
@@ -183,7 +257,14 @@ class WithdrawalGovernance:
                 pass  # 时间解析失败则跳过冷却期检查
 
         # 记录审批
-        self.db.add_withdrawal_approval(withdrawal_id, approver, decision, comment)
+        self.db.add_withdrawal_approval(
+            withdrawal_id,
+            approver,
+            decision,
+            comment,
+            approver_user_id=approver_user_id,
+            approver_role=approver_role,
+        )
         self.db.save_audit_log(
             f"WITHDRAW_{decision}", approver,
             (
@@ -194,6 +275,21 @@ class WithdrawalGovernance:
 
         if decision == "REJECTED":
             self.db.update_withdrawal_status(withdrawal_id, "REJECTED")
+            if withdrawal.get("account_id"):
+                self.db.record_ledger_entry(
+                    account_id=withdrawal["account_id"],
+                    portfolio_id=withdrawal["portfolio_id"],
+                    pool_id=withdrawal.get("source_pool_id") or withdrawal["portfolio_id"],
+                    entry_type="WITHDRAWAL_REJECTED",
+                    amount=float(withdrawal["amount"]),
+                    currency=withdrawal.get("currency") or "USD",
+                    shares_delta=0,
+                    share_price=withdrawal.get("share_price"),
+                    actor=approver,
+                    source_ref_type="withdrawal_request",
+                    source_ref_id=withdrawal_id,
+                    memo=comment or "出金申请被拒绝",
+                )
             notify_approval(withdrawal_id, withdrawal["amount"], approver, "REJECTED")
             return GovernanceResult("REJECTED", withdrawal_id, "出金请求已被拒绝")
 
@@ -203,6 +299,23 @@ class WithdrawalGovernance:
 
         if approved_count >= withdrawal["required_approvals"]:
             self.db.update_withdrawal_status(withdrawal_id, "APPROVED")
+            if approver_user_id is not None:
+                self.db.update_withdrawal_request(withdrawal_id, approved_by_user_id=approver_user_id)
+            if withdrawal.get("account_id"):
+                self.db.record_ledger_entry(
+                    account_id=withdrawal["account_id"],
+                    portfolio_id=withdrawal["portfolio_id"],
+                    pool_id=withdrawal.get("source_pool_id") or withdrawal["portfolio_id"],
+                    entry_type="WITHDRAWAL_APPROVED",
+                    amount=float(withdrawal["amount"]),
+                    currency=withdrawal.get("currency") or "USD",
+                    shares_delta=-float(withdrawal.get("shares_requested") or 0.0),
+                    share_price=withdrawal.get("share_price"),
+                    actor=approver,
+                    source_ref_type="withdrawal_request",
+                    source_ref_id=withdrawal_id,
+                    memo=f"出金审批通过 ({approved_count}/{withdrawal['required_approvals']})",
+                )
             notify_approval(withdrawal_id, withdrawal["amount"], approver, "APPROVED")
             logger.info(f"出金 #{withdrawal_id} 多签通过 ({approved_count}/{withdrawal['required_approvals']})")
             return GovernanceResult(

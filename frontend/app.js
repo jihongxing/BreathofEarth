@@ -365,7 +365,15 @@ document.getElementById("portfolio-select").addEventListener("change", function(
 async function loadDashboard() {
   if (!isAuthed()) return;
   try {
+    var shadowAuditPromise = api("/api/shadow-audit/" + currentPortfolio).catch(function(err) {
+      return buildStage95ErrorPayload(err);
+    });
+    var stage95SummaryPromise = api("/api/stage95-observation-summary/" + currentPortfolio).catch(function(err) {
+      return buildStage95SummaryErrorPayload(err);
+    });
     var d = await api("/api/dashboard/" + currentPortfolio + "?days=90");
+    var shadowAudit = await shadowAuditPromise;
+    var stage95Summary = await stage95SummaryPromise;
 
     document.getElementById("stat-nav").textContent = d.currency + formatNum(d.current_nav);
 
@@ -382,6 +390,7 @@ async function loadDashboard() {
     renderDrawdownChart(d.drawdown_series);
     renderRiskEvents(d.risk_events);
     renderObservationOverview(d.observation_overview, d.currency);
+    renderStage95ShadowAudit(shadowAudit, stage95Summary, d.currency);
     renderCoreObservationHistory(d.core_observation, d.currency);
     renderBrokerSync(d.broker_sync, d.currency, d.core_observation);
     renderShadowRun(d.shadow_run);
@@ -549,6 +558,20 @@ function executionPolicyGateReasonText(code) {
 
 function formatPercentValue(value) {
   return (Number(value || 0) * 100).toFixed(1) + "%";
+}
+
+function formatWeightPercent(value) {
+  return (Number(value || 0) * 100).toFixed(2) + "%";
+}
+
+function formatBps(value) {
+  if (value == null || value === "") return "--";
+  return Number(value).toFixed(2) + " bps";
+}
+
+function formatAgeHours(value) {
+  if (value == null || value === "") return "--";
+  return Number(value).toFixed(1) + "h";
 }
 
 function summarizeLiveExecutionPolicy(policy, currencySymbol) {
@@ -885,6 +908,213 @@ function renderObservationOverview(overviewData, currencySymbol) {
             : '') +
         '</div>';
     }).join("") + '</div>';
+}
+
+function buildStage95ErrorPayload(err) {
+  return {
+    status: "ATTENTION",
+    level: "warning",
+    requires_attention: true,
+    live_leverage_approved: false,
+    production_conclusion: "Research PASS / Production design APPROVED / Live leveraged execution NOT YET APPROVED",
+    components: {
+      shadow_sync: {
+        status: "unavailable",
+        level: "warning",
+        requires_attention: true,
+        warnings: [err && err.message ? err.message : t("stage95ApiUnavailable")],
+      },
+      margin_snapshot: {
+        status: "unavailable",
+        level: "warning",
+        requires_attention: true,
+        warnings: [t("stage95ApiUnavailable")],
+      },
+    },
+  };
+}
+
+function buildStage95SummaryErrorPayload(err) {
+  return {
+    status: "ATTENTION",
+    level: "warning",
+    requires_attention: true,
+    live_leverage_approved: false,
+    production_conclusion: "Research PASS / Production design APPROVED / Live leveraged execution NOT YET APPROVED",
+    summary: {
+      status: "unavailable",
+      level: "warning",
+      requires_attention: true,
+      warnings: [err && err.message ? err.message : t("stage95SummaryApiUnavailable")],
+      expected_cycles: 60,
+      observed_cycles: 0,
+      coverage_ratio: 0,
+      broker_unavailable_cycles: 0,
+      abnormal_streak: {},
+      broker_unavailable_streak: {},
+      slippage_bps: {},
+      margin_field_coverage: {},
+      live_leverage_approved: false,
+    },
+  };
+}
+
+function renderStage95ShadowAudit(auditData, summaryData, currencySymbol) {
+  var el = document.getElementById("stage95-shadow-audit");
+  if (!el) return;
+
+  if (!auditData || !auditData.components) {
+    el.innerHTML = emptyStateHTML("S9.5", "stage95Missing", "stage95MissingHint");
+    return;
+  }
+
+  var shadow = auditData.components.shadow_sync || {};
+  var margin = auditData.components.margin_snapshot || {};
+  var targetWeights = shadow.target_weights || {};
+  var targetNotionals = shadow.target_notionals || {};
+  var slippage = shadow.slippage_audit || {};
+  var marginFields = margin.margin_fields || {};
+  var netLiquidation = marginFields.NetLiquidation || marginFields.NetLiquidationValue || {};
+  var excessLiquidity = marginFields.ExcessLiquidity || {};
+  var maintainReq = marginFields.FullMaintainMarginReq || marginFields.MaintMarginReq || {};
+  var conclusion = auditData.production_conclusion || t("stage95ConclusionText");
+  var warningList = []
+    .concat(shadow.warnings || [])
+    .concat(margin.warnings || [])
+    .slice(0, 4);
+  var leverageApproved = auditData.live_leverage_approved === true;
+  var summary = (summaryData && summaryData.summary) || null;
+
+  var assetRows = Object.keys(targetWeights).sort().map(function(symbol) {
+    var notional = targetNotionals[symbol];
+    return '' +
+      '<div class="stage95-asset-row">' +
+        '<span class="stage95-asset-symbol">' + esc(symbol) + '</span>' +
+        '<span>' + esc(formatWeightPercent(targetWeights[symbol])) + '</span>' +
+        '<span>' + esc((currencySymbol || "$") + formatNum(notional)) + '</span>' +
+      '</div>';
+  }).join("");
+
+  el.innerHTML = '' +
+    '<div class="stage95-card level-' + esc(auditData.level || "missing") + '">' +
+      '<div class="stage95-head">' +
+        '<div>' +
+          '<div class="stage95-kicker">' + esc(t("stage95Kicker")) + '</div>' +
+          '<div class="stage95-status">' + esc(observationStatusText(auditData.level || "missing")) + '</div>' +
+        '</div>' +
+        '<span class="badge ' + brokerBadgeClass(auditData.level || "missing") + '">' + esc(
+          auditData.requires_attention ? t("brokerAttentionNeeded") : t("brokerAttentionNotNeeded")
+        ) + '</span>' +
+      '</div>' +
+      '<div class="stage95-banner ' + (leverageApproved ? "approved" : "blocked") + '">' +
+        '<div class="stage95-banner-title">' + esc(t("stage95LiveLeverage")) + ': ' + esc(leverageApproved ? t("stage95Approved") : t("stage95NotApproved")) + '</div>' +
+        '<div class="stage95-banner-text">' + esc(conclusion) + '</div>' +
+      '</div>' +
+      '<div class="stage95-grid">' +
+        '<div class="stage95-section">' +
+          '<div class="stage95-section-title">' + esc(t("stage95ShadowSync")) + '</div>' +
+          '<div class="stage95-meta">' +
+            '<span>' + esc(t("stage95Status")) + ': ' + esc(String(shadow.status || "--")) + '</span>' +
+            '<span>' + esc(t("brokerLastCheck")) + ': ' + esc(formatSyncTime(shadow.last_run_at)) + '</span>' +
+            '<span>' + esc(t("stage95Age")) + ': ' + esc(formatAgeHours(shadow.age_hours)) + '</span>' +
+            '<span>' + esc(t("stage95Broker")) + ': ' + esc(((shadow.broker || {}).name || "--").toUpperCase()) + '</span>' +
+            '<span>' + esc(t("shadowRunOrders")) + ': ' + esc(String(shadow.order_count || 0)) + '</span>' +
+            '<span>' + esc(t("stage95Slippage")) + ': ' + esc(formatBps(slippage.max_observed_half_spread_bps)) + '</span>' +
+          '</div>' +
+        '</div>' +
+        '<div class="stage95-section">' +
+          '<div class="stage95-section-title">' + esc(t("stage95MarginSnapshot")) + '</div>' +
+          '<div class="stage95-meta">' +
+            '<span>' + esc(t("stage95Status")) + ': ' + esc(String(margin.status || "--")) + '</span>' +
+            '<span>' + esc(t("brokerLastCheck")) + ': ' + esc(formatSyncTime(margin.last_run_at)) + '</span>' +
+            '<span>' + esc(t("stage95Age")) + ': ' + esc(formatAgeHours(margin.age_hours)) + '</span>' +
+            '<span>' + esc(t("stage95NetLiquidation")) + ': ' + esc(netLiquidation.value == null ? "--" : (currencySymbol || "$") + formatNum(netLiquidation.value)) + '</span>' +
+            '<span>' + esc(t("stage95ExcessLiquidity")) + ': ' + esc(excessLiquidity.value == null ? "--" : (currencySymbol || "$") + formatNum(excessLiquidity.value)) + '</span>' +
+            '<span>' + esc(t("stage95MaintainReq")) + ': ' + esc(maintainReq.value == null ? "--" : (currencySymbol || "$") + formatNum(maintainReq.value)) + '</span>' +
+          '</div>' +
+        '</div>' +
+      '</div>' +
+      '<div class="stage95-section stage95-assets">' +
+        '<div class="stage95-section-title">' + esc(t("stage95TargetBook")) + '</div>' +
+        '<div class="stage95-meta stage95-stale-meta">' +
+          '<span>' + esc(t("stage95StaleReports")) + ': ' + esc(String(auditData.stale_report_count || 0)) + '</span>' +
+          '<span>' + esc(t("stage95StaleThreshold")) + ': ' + esc(formatAgeHours(auditData.stale_after_hours)) + '</span>' +
+        '</div>' +
+        '<div class="stage95-asset-head">' +
+          '<span>' + esc(t("stage95Asset")) + '</span>' +
+          '<span>' + esc(t("stage95Weight")) + '</span>' +
+          '<span>' + esc(t("stage95Notional")) + '</span>' +
+        '</div>' +
+        (assetRows || '<div class="stage95-empty">' + esc(t("stage95NoTargetBook")) + '</div>') +
+      '</div>' +
+      (warningList.length
+        ? '<div class="shadow-run-warnings stage95-warnings">' + warningList.map(function(item) {
+            return '<div class="shadow-run-warning">' + esc(item) + '</div>';
+          }).join("") + '</div>'
+        : '') +
+      renderStage95ObservationSummary(summaryData, summary) +
+      '<div class="broker-sync-overall-note">' + esc(t("stage95ReadonlyHint")) + '</div>' +
+    '</div>';
+}
+
+function renderStage95ObservationSummary(summaryData, summary) {
+  if (!summary) {
+    return '' +
+      '<div class="stage95-section stage95-summary">' +
+        '<div class="stage95-section-title">' + esc(t("stage95SummaryTitle")) + '</div>' +
+        '<div class="stage95-empty">' + esc(t("stage95SummaryMissing")) + '</div>' +
+      '</div>';
+  }
+
+  var marginCoverage = summary.margin_field_coverage || {};
+  var slippage = summary.slippage_bps || {};
+  var abnormalStreak = summary.abnormal_streak || {};
+  var brokerStreak = summary.broker_unavailable_streak || {};
+  var coverageText = String(summary.observed_cycles || 0) + '/' + String(summary.expected_cycles || 0) +
+    ' (' + formatPercentValue(summary.coverage_ratio || 0) + ')';
+  var summaryWarnings = (summary.warnings || []).slice(0, 3);
+
+  return '' +
+    '<div class="stage95-section stage95-summary level-' + esc((summaryData && summaryData.level) || summary.level || "missing") + '">' +
+      '<div class="stage95-summary-head">' +
+        '<div>' +
+          '<div class="stage95-section-title">' + esc(t("stage95SummaryTitle")) + '</div>' +
+          '<div class="stage95-summary-subtitle">' + esc(t("stage95SummaryStatus")) + ': ' + esc(String(summary.status || "--")) + '</div>' +
+        '</div>' +
+        '<span class="badge ' + brokerBadgeClass((summaryData && summaryData.level) || summary.level || "missing") + '">' + esc(
+          summary.requires_attention ? t("brokerAttentionNeeded") : t("brokerAttentionNotNeeded")
+        ) + '</span>' +
+      '</div>' +
+      '<div class="stage95-summary-grid">' +
+        '<div class="stage95-summary-metric">' +
+          '<span>' + esc(t("stage95SummaryCoverage")) + '</span>' +
+          '<strong>' + esc(coverageText) + '</strong>' +
+        '</div>' +
+        '<div class="stage95-summary-metric">' +
+          '<span>' + esc(t("stage95SummaryBrokerUnavailable")) + '</span>' +
+          '<strong>' + esc(String(summary.broker_unavailable_cycles || 0)) + '</strong>' +
+        '</div>' +
+        '<div class="stage95-summary-metric">' +
+          '<span>' + esc(t("stage95SummaryMarginCoverage")) + '</span>' +
+          '<strong>' + esc(formatPercentValue(marginCoverage.all_required_ratio || 0)) + '</strong>' +
+        '</div>' +
+        '<div class="stage95-summary-metric">' +
+          '<span>' + esc(t("stage95SummaryMaxSlippage")) + '</span>' +
+          '<strong>' + esc(formatBps(slippage.max)) + '</strong>' +
+        '</div>' +
+      '</div>' +
+      '<div class="stage95-meta stage95-summary-meta">' +
+        '<span>' + esc(t("stage95SummaryAbnormalStreak")) + ': ' + esc(String(abnormalStreak.current || 0)) + ' / ' + esc(String(abnormalStreak.max || 0)) + '</span>' +
+        '<span>' + esc(t("stage95SummaryBrokerStreak")) + ': ' + esc(String(brokerStreak.current || 0)) + ' / ' + esc(String(brokerStreak.max || 0)) + '</span>' +
+        '<span>' + esc(t("stage95SummaryLatestAge")) + ': ' + esc(formatAgeHours(summary.latest_age_hours)) + '</span>' +
+        '<span>' + esc(t("stage95SummaryLastCycle")) + ': ' + esc(formatSyncTime(summary.last_cycle_at)) + '</span>' +
+      '</div>' +
+      (summaryWarnings.length
+        ? '<div class="shadow-run-warnings stage95-warnings">' + summaryWarnings.map(function(item) {
+            return '<div class="shadow-run-warning">' + esc(item) + '</div>';
+          }).join("") + '</div>'
+        : '') +
+    '</div>';
 }
 
 function renderShadowRun(shadowData) {

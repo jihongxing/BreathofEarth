@@ -359,6 +359,180 @@ tbody tr:nth-child(even):hover {
   line-height: 1.45;
   color: var(--text-dim);
 }
+
+/* ── Stage 9.5 Shadow Audit ── */
+.stage95-panel {
+  display: grid;
+  gap: 12px;
+}
+.stage95-card {
+  background: rgba(255,255,255,0.025);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+}
+.stage95-card.level-healthy { border-color: rgba(90,154,110,0.35); }
+.stage95-card.level-warning { border-color: rgba(234,179,8,0.35); }
+.stage95-card.level-critical { border-color: rgba(176,112,112,0.45); }
+.stage95-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+.stage95-kicker {
+  font-size: 0.72rem;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+}
+.stage95-status {
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--text);
+}
+.stage95-banner {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  border: 1px solid rgba(255,255,255,0.06);
+  background: rgba(255,255,255,0.025);
+}
+.stage95-banner.blocked {
+  border-color: rgba(234,179,8,0.22);
+  background: rgba(234,179,8,0.06);
+}
+.stage95-banner.approved {
+  border-color: rgba(90,154,110,0.24);
+  background: rgba(90,154,110,0.06);
+}
+.stage95-banner-title {
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--text);
+}
+.stage95-banner-text {
+  margin-top: 4px;
+  font-size: 0.76rem;
+  line-height: 1.45;
+  color: var(--text-dim);
+}
+.stage95-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+.stage95-section {
+  padding: 10px 12px;
+  border: 1px solid rgba(255,255,255,0.05);
+  border-radius: var(--radius);
+  background: rgba(255,255,255,0.02);
+}
+.stage95-section-title {
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 8px;
+}
+.stage95-meta {
+  display: grid;
+  gap: 5px;
+  font-size: 0.76rem;
+  color: var(--text-dim);
+}
+.stage95-assets {
+  margin-top: 10px;
+}
+.stage95-stale-meta {
+  margin-bottom: 8px;
+}
+.stage95-asset-head,
+.stage95-asset-row {
+  display: grid;
+  grid-template-columns: minmax(64px, 0.8fr) minmax(80px, 1fr) minmax(120px, 1.2fr);
+  gap: 10px;
+  align-items: center;
+}
+.stage95-asset-head {
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  padding-bottom: 6px;
+  border-bottom: 1px solid rgba(255,255,255,0.05);
+}
+.stage95-asset-row {
+  min-height: 30px;
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  border-bottom: 1px solid rgba(255,255,255,0.035);
+}
+.stage95-asset-row:last-child {
+  border-bottom: none;
+}
+.stage95-asset-symbol {
+  font-weight: 700;
+  color: var(--text);
+}
+.stage95-empty {
+  font-size: 0.76rem;
+  color: var(--text-dim);
+  padding-top: 8px;
+}
+.stage95-warnings {
+  margin-top: 10px;
+}
+.stage95-summary {
+  margin-top: 10px;
+}
+.stage95-summary-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 10px;
+}
+.stage95-summary-subtitle {
+  font-size: 0.72rem;
+  color: var(--text-dim);
+  margin-top: -4px;
+}
+.stage95-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+.stage95-summary-metric {
+  min-height: 56px;
+  padding: 9px 10px;
+  border: 1px solid rgba(255,255,255,0.05);
+  border-radius: var(--radius);
+  background: rgba(255,255,255,0.02);
+}
+.stage95-summary-metric span {
+  display: block;
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+}
+.stage95-summary-metric strong {
+  display: block;
+  font-size: 0.9rem;
+  color: var(--text);
+}
+.stage95-summary-meta {
+  margin-top: 10px;
+}
+
+@media (max-width: 640px) {
+  .stage95-asset-head,
+  .stage95-asset-row {
+    grid-template-columns: 0.7fr 0.8fr 1fr;
+    gap: 6px;
+    font-size: 0.72rem;
+  }
+  .stage95-summary-head {
+    display: grid;
+  }
+}
 .observation-chain-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));

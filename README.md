@@ -7,7 +7,7 @@
 
 ## 当前状态
 
-当前项目状态：`已完成最小真实交易能力边界，进入阶段性暂停扩功能 + 文档收口阶段`
+当前项目状态：`Research PASS / Production design APPROVED / Live leveraged execution NOT YET APPROVED`
 
 已经落地：
 
@@ -17,7 +17,31 @@
 - `IBKR / Futu / Paper` 三类适配器骨架已具备
 - `BrokerExecutor` 已接入最小真实执行骨架
 - 真实执行审计流水已落库：`broker_execution_events`
-- 首页与只读观察面板已能查看 `Core / Broker Sync / Shadow Run`
+- 首页与只读观察面板已能查看 `Core / Broker Sync / Shadow Run / Stage 9.5`
+- 已完成干净数据口径下的 90/10 生产候选审计：`90% 防御核心 + 10% 现代贝塔卫星`
+- 已新增 Stage 9.5 影子观察链路：`live.stage95_shadow_runner` 串联 `live.shadow_sync` 与 `live.margin_monitor`，只读 API 与前端面板已接入
+
+## 项目主线
+
+这三层不要混：
+
+```mermaid
+flowchart TD
+    A["永续投资组合"] --> B["研究基线, 只做对照"]
+    C["90% + 10% 生产候选"] --> D["当前策略主线, 只允许影子观察"]
+    E["Stage 9.5"] --> F["运行治理层, 只读审计 / 只读面板"]
+    F --> D
+```
+
+- 永续投资组合, 现在是**研究基线**。它负责告诉我们经典永久组合在现代宏观下能走到哪里, 不是当前要跑的主策略。
+- `90% 防御核心 + 10% 现代贝塔卫星`, 现在是**生产候选策略**。它是被审计过、允许继续往下走的对象。
+- `Stage 9.5`, 不是收益策略, 是**影子观察与风控治理层**。它只负责看 `shadow_sync`、`margin_monitor`、只读 API 和前端是否按红线运行。
+
+所以现在项目主线不是“继续再造一套新策略”, 而是：
+
+1. 用 Stage 9.5 连续观察当前生产候选。
+2. 维持只读、fail closed、不能自动实盘。
+3. 只有在人工评审通过后, 才能再谈下一步。
 
 明确不做或暂不推进：
 
@@ -25,6 +49,8 @@
 - 自动主备切换
 - 刺激交易冲动的操作台
 - 在账本闭环前继续扩收益增强模块
+- 直接实盘杠杆执行
+- 把 Portfolio Margin 理论安全边界当成券商真实保证
 
 ## 它是什么
 
@@ -52,31 +78,63 @@
 
 更准确地说，它是一个带有最小执行能力的资产控制系统，而不是一个追求交易活跃度的交易产品。
 
-## 当前可执行结果
+## 当前审计结论
 
-2026-04-17 本地执行：
+早期引擎口径曾显示 `CAGR 7.65% / MDD -18.12%`，但后续审计发现 AkShare 美股 `qfq` 前复权在长周期分红 ETF 上可能生成负价格，污染回测收益。
+
+当前项目以干净 Yahoo Adj Close 数据为准。2026-06-23 阶段性结论：
+
+- 固定防御核心，50bp 恐慌滑点：约 `CAGR 6.27% / MDD -11.29%`
+- 90/10 生产候选聚合：约 `CAGR 7.60% / MDD -13.95%`
+- 研究结论：`PASS`
+- 生产设计：`APPROVED`
+- 实盘杠杆执行：`NOT YET APPROVED`
+
+成本口径：
+
+- 已包含：Yahoo Adj Close 总回报口径、再平衡交易摩擦、动态压力滑点、急性恐慌卖出额外 `50bp` 惩罚。
+- 部分包含：卫星 sleeve 年度再平衡成本，按 `FEE_RATE = 0.001` 扣除。
+- 未包含：真实税务、非居民股息预扣税、券商现金利息与保证金融资负利差、真实成交队列/盘口冲击、运行失败成本、券商临时提高保证金要求、跨境清算与合规摩擦。
+
+因此 `7.60% / -13.95%` 是**研究净值口径**，不是税后、券商后、故障后的实盘净值口径。任何实盘判断都必须经过 Stage 9.5 影子观察和后续真实摩擦审计。
+
+第一版真实摩擦压力审计结果：
+
+- 无杠杆基础压力：约 `CAGR 5.75% / MDD -15.32%`
+- 无杠杆保守压力：约 `CAGR 3.53% / MDD -16.99%`
+- `1.15x` 融资参考压力：约 `CAGR 5.90% / MDD -17.94%`
+
+这说明当前 90/10 候选更适合定义为防御底座，而不是已经满足高净后收益目标的完整实盘系统。细节见 [真实摩擦压力审计](D:/codeSpace/BreathofEarth/docs/20-%E7%9C%9F%E5%AE%9E%E6%91%A9%E6%93%A6%E5%8E%8B%E5%8A%9B%E5%AE%A1%E8%AE%A1.md)。
+
+Benchmark 对比必须使用双口径：
+
+- 研究口径：`research_current`
+- 真实摩擦基础口径：`unlevered_base_case`
+
+当前结论是：真实摩擦口径下，候选系统收益低于 `VBIAX / PRPFX`，但最大回撤显著更浅；在 `RPAR` 的较短历史窗口内，收益与回撤均占优。细节见 [Benchmark 对比审计](D:/codeSpace/BreathofEarth/docs/21-Benchmark%E5%AF%B9%E6%AF%94%E5%AE%A1%E8%AE%A1.md)。
+
+数据文件治理：
+
+- `data/raw/*.csv` 是可再生成的本地缓存，默认不作为普通 PR 审计输入提交。
+- 已批准的研究复现输入放在 `data/audit_snapshots/<date>-<source>/`。
+- `data/data_manifest.json` / `data/data_status.json` 记录本地 raw 缓存状态；冻结快照目录必须自带 `manifest.json`，记录行数、日期范围和 SHA256。
+
+最终候选拓扑：
+
+- 90% 防御核心：`SPY / TLT / GLD / SHV`
+- 10% 现代贝塔卫星：默认 `QQQ / SPY / GLD`
+- 合并权重：`SPY 25.5% / TLT 22.5% / GLD 25.5% / SHV 22.5% / QQQ 4.0%`
+
+当前最重要的命令不是实盘下单，而是影子观察：
 
 ```bash
-python -m backtest.engine_backtest
+python -m live.stage95_shadow_runner --aum 2000000 --no-broker --skip-db
+python -m live.stage95_observation_summary --shadow-dir data/shadow --expected-cycles 60
 ```
 
-当前引擎回测结果为：
+第一条命令会写出 `latest_shadow_sync.json`、`latest_margin_snapshot.json` 与 `latest_stage95_cycle.json`。第二条命令会生成 `latest_stage95_observation_summary.json`，汇总 60 日观察覆盖率、券商不可用次数、滑点和保证金字段覆盖率。`margin_monitor` 在券商不可达或保证金字段缺失时必须返回 `UNAVAILABLE`，不能推导安全结论。
 
-- 年化收益（CAGR）：`7.65%`
-- 最大回撤（MDD）：`-18.12%`
-- 夏普比率：`0.61`
-
-当前判定：
-
-- `CAGR ≥ 通胀 + 2%`：通过
-- `MDD ≤ -15%`：未通过
-- `夏普 > 0.5`：通过
-
-因此，当前仓库不应再对外表述为“三项标准全部通过”。更诚实的说法是：
-
-- 方向仍然成立
-- 当前执行版本仍需继续调优风控与回测口径
-- 系统价值更多来自边界硬化和低错误率，而不是宣称已经得到完美收益曲线
+Stage 9.5 的 FastAPI 只读接口与前端面板已经接入。缺失、过期、不可解析、券商不可达或保证金字段缺失的报告必须显示为需要关注，不能被渲染成安全状态。该面板不提供交易、加杠杆或 Shadow 转 Live 的入口。
 
 ## 运行边界
 
@@ -115,7 +173,13 @@ python -m backtest.engine_backtest
   - 模拟券商接口
   - 用于 Shadow / Sandbox / 回归测试
 
-真实执行不是默认开启的。即使代码已具备能力，也必须显式开启券商级环境变量，并通过：
+真实执行不是默认开启的。即使代码已具备能力，也必须先通过 Core 层总闸门、人工批准引用和券商级开关：
+
+- `XIRANG_ENABLE_LIVE_CORE_EXECUTION=1`
+- `XIRANG_LIVE_CORE_APPROVAL_ID=<人工批准编号>`
+- `IBKR_ENABLE_ORDER_SUBMISSION=1` 或对应券商级提交开关
+
+随后仍必须通过：
 
 - 券商同步覆盖交易日
 - 对账不漂移
@@ -129,14 +193,43 @@ python -m backtest.engine_backtest
 # 安装依赖
 pip install -r requirements.txt
 
+# 运行配置自检与单元测试
+python -c "from engine.config import validate_config; validate_config()"
+python -m pytest tests -q
+
 # 运行引擎回测
 python -m backtest.engine_backtest
 
 # 启动 Web 服务
 python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+```
 
+首次启动 API 后，需要先创建第一个管理员用户。首次初始化只允许本机请求；如果必须远程初始化，需要先设置一次性环境变量 `XIRANG_INIT_USER_SECRET`，并在请求头带上 `X-Xirang-Init-Secret`。
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/admin/init-user \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"请替换为强密码","role":"admin"}'
+```
+
+生产环境还应显式设置：
+
+```bash
+XIRANG_ENV=production
+XIRANG_JWT_SECRET=至少32位的随机密钥
+```
+
+每日任务已经接入券商同步硬闸门。空库或未完成券商只读同步/对账时，`daily_runner` 会 fail closed，这是预期行为。
+
+```bash
+# 完成只读同步与对账后，再手动运行每日任务
+python -m runner.broker_sync --portfolio us
 # 手动运行每日任务
 python -m runner.daily_runner
+
+# Stage 9.5：生产候选影子观察，不下单
+python -m live.stage95_shadow_runner --aum 2000000 --no-broker --skip-db
+python -m live.stage95_observation_summary --shadow-dir data/shadow --expected-cycles 60
 ```
 
 ## 常用命令
@@ -147,6 +240,8 @@ python -m runner.report
 python -m runner.report --days 30
 python -m runner.broker_sync --portfolio us
 python -m runner.broker_sync --portfolio cn --role backup
+python data/daily_fetch.py --no-push
+python data/daily_fetch.py --force
 ```
 
 ## 项目结构
@@ -160,6 +255,7 @@ BreathofEarth/
 ├── docs/                 # 项目文档
 ├── engine/               # 核心引擎、执行层、治理层、Alpha
 ├── frontend/             # 只读观察面板
+├── live/                 # 生产前只读影子同步与保证金监控
 ├── runner/               # daily_runner / broker_sync / shadow_run / report
 ├── tests/                # 回归测试
 ├── CHANGELOG.md
@@ -177,6 +273,12 @@ BreathofEarth/
 - [实盘路线图](D:/codeSpace/BreathofEarth/docs/09-%E5%AE%9E%E7%9B%98%E8%B7%AF%E7%BA%BF%E5%9B%BE.md)
 - [家族资产稳健化审计](D:/codeSpace/BreathofEarth/docs/12-%E5%AE%B6%E6%97%8F%E8%B5%84%E4%BA%A7%E7%A8%B3%E5%81%A5%E5%8C%96%E5%AE%A1%E8%AE%A1.md)
 - [券商接入主备与沙箱实施方案](D:/codeSpace/BreathofEarth/docs/13-%E5%88%B8%E5%95%86%E6%8E%A5%E5%85%A5%E4%B8%BB%E5%A4%87%E4%B8%8E%E6%B2%99%E7%AE%B1%E5%AE%9E%E6%96%BD%E6%96%B9%E6%A1%88.md)
+- [家族办公室平台化规划](D:/codeSpace/BreathofEarth/docs/14-%E5%AE%B6%E6%97%8F%E5%8A%9E%E5%85%AC%E5%AE%A4%E5%B9%B3%E5%8F%B0%E5%8C%96%E8%A7%84%E5%88%92.md)
+- [生产候选方案与后续开发指南](D:/codeSpace/BreathofEarth/docs/15-%E7%94%9F%E4%BA%A7%E5%80%99%E9%80%89%E6%96%B9%E6%A1%88%E4%B8%8E%E5%90%8E%E7%BB%AD%E5%BC%80%E5%8F%91%E6%8C%87%E5%8D%97.md)
+- [Stage 9.5 影子观察运行手册](D:/codeSpace/BreathofEarth/docs/16-Stage9.5%E5%BD%B1%E5%AD%90%E8%A7%82%E5%AF%9F%E8%BF%90%E8%A1%8C%E6%89%8B%E5%86%8C.md)
+- [IBKR 只读接入清单](D:/codeSpace/BreathofEarth/docs/19-IBKR%E5%8F%AA%E8%AF%BB%E6%8E%A5%E5%85%A5%E6%B8%85%E5%8D%95.md)
+- [真实摩擦压力审计](D:/codeSpace/BreathofEarth/docs/20-%E7%9C%9F%E5%AE%9E%E6%91%A9%E6%93%A6%E5%8E%8B%E5%8A%9B%E5%AE%A1%E8%AE%A1.md)
+- [Benchmark 对比审计](D:/codeSpace/BreathofEarth/docs/21-Benchmark%E5%AF%B9%E6%AF%94%E5%AE%A1%E8%AE%A1.md)
 
 ## 一句话总结
 

@@ -153,6 +153,28 @@ class DailyRunner:
             "max_daily_turnover_ratio": float(policy.get("max_daily_turnover_ratio", 0.0)),
         }
 
+    def _check_live_core_execution_gate(self, portfolio_id: str, executor_mode: str) -> dict | None:
+        if executor_mode not in {"semi_auto", "auto"}:
+            return None
+
+        enabled = os.environ.get("XIRANG_ENABLE_LIVE_CORE_EXECUTION", "").lower() in {"1", "true", "yes"}
+        approval_id = os.environ.get("XIRANG_LIVE_CORE_APPROVAL_ID", "").strip()
+        if not enabled:
+            return self._build_fail_closed(
+                "LIVE_EXECUTION_GLOBAL_DISABLED",
+                "真实 Core 执行总闸门未开启，停止本次 Core 调仓",
+                portfolio_id=portfolio_id,
+                required_env="XIRANG_ENABLE_LIVE_CORE_EXECUTION",
+            )
+        if not approval_id:
+            return self._build_fail_closed(
+                "LIVE_EXECUTION_APPROVAL_MISSING",
+                "真实 Core 执行缺少人工批准引用，停止本次 Core 调仓",
+                portfolio_id=portfolio_id,
+                required_env="XIRANG_LIVE_CORE_APPROVAL_ID",
+            )
+        return None
+
     def _parse_timestamp(self, value: str | None) -> datetime | None:
         if not value:
             return None
@@ -309,6 +331,10 @@ class DailyRunner:
     ) -> dict | None:
         if executor_mode not in {"semi_auto", "auto"}:
             return None
+
+        live_core_gate = self._check_live_core_execution_gate(portfolio_id, executor_mode)
+        if live_core_gate:
+            return live_core_gate
 
         policy = self._get_live_execution_policy(portfolio_id)
         market_name = PORTFOLIOS[portfolio_id]["name"]
@@ -827,34 +853,45 @@ class DailyRunner:
                 action = "策略拦截: Core 常规调仓不允许人工确认模式"
                 tx_type = "REBALANCE_BLOCKED"
             else:
-                try:
-                    executor = create_executor(market_data_service=market, use_twap=False, assets=assets)
-                    trade_orders = executor.translate_orders(
-                        current_positions=current_positions,
-                        target_weights=order.target_weights,
-                        total_nav=engine.core_nav,
-                        current_prices=current_prices,
+                execution_policy_gate = self._check_live_core_execution_gate(
+                    portfolio_id,
+                    executor_mode,
+                )
+                if execution_policy_gate:
+                    execution_result = self._build_blocked_execution_result(
+                        [],
+                        execution_policy_gate["message"],
                     )
-                    execution_policy_gate = self._check_live_execution_policy(
-                        portfolio_id=portfolio_id,
-                        executor_mode=executor_mode,
-                        order=order,
-                        trade_orders=trade_orders,
-                    )
-                    if execution_policy_gate:
-                        execution_result = self._build_blocked_execution_result(
-                            trade_orders,
-                            execution_policy_gate["message"],
-                        )
-                        execution_status = "FAILED"
-                    else:
-                        execution_result = executor.execute(trade_orders)
-                        execution_status = self._classify_execution(execution_result)
-                except Exception as e:
                     execution_status = "FAILED"
-                    action = f"执行异常: {type(e).__name__}"
-                    tx_type = "REBALANCE_FAILED"
-                    logger.error(f"  执行层异常: {e}")
+                else:
+                    try:
+                        executor = create_executor(market_data_service=market, use_twap=False, assets=assets)
+                        trade_orders = executor.translate_orders(
+                            current_positions=current_positions,
+                            target_weights=order.target_weights,
+                            total_nav=engine.core_nav,
+                            current_prices=current_prices,
+                        )
+                        execution_policy_gate = self._check_live_execution_policy(
+                            portfolio_id=portfolio_id,
+                            executor_mode=executor_mode,
+                            order=order,
+                            trade_orders=trade_orders,
+                        )
+                        if execution_policy_gate:
+                            execution_result = self._build_blocked_execution_result(
+                                trade_orders,
+                                execution_policy_gate["message"],
+                            )
+                            execution_status = "FAILED"
+                        else:
+                            execution_result = executor.execute(trade_orders)
+                            execution_status = self._classify_execution(execution_result)
+                    except Exception as e:
+                        execution_status = "FAILED"
+                        action = f"执行异常: {type(e).__name__}"
+                        tx_type = "REBALANCE_FAILED"
+                        logger.error(f"  执行层异常: {e}")
 
                 if execution_policy_gate:
                     action = f"系统拦截: {execution_policy_gate['message']}"
@@ -1075,6 +1112,22 @@ class DailyRunner:
                         conn=conn,
                     )
                 report["insurance"]["decision_id"] = insurance_decision_id
+                pool = self.db.revalue_investment_pool(
+                    pool_id=portfolio_id,
+                    nav=engine.nav,
+                    actor="daily_runner",
+                    source="DAILY_RUN",
+                    snapshot_date=today,
+                    conn=conn,
+                )
+                report["investment_pool"] = {
+                    "id": pool["id"],
+                    "portfolio_id": pool["portfolio_id"],
+                    "nav": round(float(pool["nav"]), 2),
+                    "shares_outstanding": round(float(pool["shares_outstanding"]), 8),
+                    "share_price": round(float(pool["share_price"]), 8),
+                    "snapshot_id": pool.get("snapshot_id"),
+                }
                 if order:
                     transaction_reason = (
                         f"{action or tx_type or 'Core rebalance'} "

@@ -7,7 +7,7 @@
 1. 本地 CSV 是唯一真相来源（Single Source of Truth）
 2. 增量更新：只拉缺失的日期，不重复拉已有数据
 3. 统一限流：所有 API 调用经过同一个速率控制器
-4. akshare 优先：中国用 sina/em，美股用 stock_us_daily，yfinance 仅作最终 fallback
+4. 数据源按资产特性选择：中国用 akshare sina/em；美股 ETF 优先 Yahoo Adj Close
 5. 回测零 API：回测引擎直接读本地 CSV，永远不触网
 6. 单 ticker 失败不崩溃：跳过继续，用本地缓存兜底
 
@@ -31,7 +31,7 @@ import logging
 import hashlib
 import json
 import os
-from datetime import datetime, timedelta
+from datetime import date, datetime, time as datetime_time, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -43,6 +43,7 @@ logger = logging.getLogger("xirang.data_manager")
 DATA_DIR = Path(__file__).parent
 RAW_DIR = DATA_DIR / "raw"
 STATUS_FILE = DATA_DIR / "data_status.json"
+FETCH_STATE_FILE = DATA_DIR / "data_fetch_state.json"
 
 # ── 市场配置 ──────────────────────────────────────────
 
@@ -197,8 +198,47 @@ def _is_rate_limit_error(e: Exception) -> bool:
     """判断异常是否是限流错误。"""
     msg = str(e).lower()
     return any(
-        kw in msg for kw in ["rate limit", "too many requests", "429", "ratelimit"]
+        kw in msg
+        for kw in [
+            "rate limit",
+            "too many requests",
+            "429",
+            "ratelimit",
+            "yfinance 返回空数据",
+            "possibly delisted",
+            "temporarily unavailable",
+        ]
     )
+
+
+def _previous_weekday(day: date) -> date:
+    """Return the latest Monday-Friday date on or before day."""
+    while day.weekday() >= 5:
+        day -= timedelta(days=1)
+    return day
+
+
+def _expected_live_date(key: str, now: datetime) -> date:
+    """
+    估算当前时刻外部数据源应当已经可用的最新交易日。
+
+    使用北京时间语义：
+    - A 股：16:30 之后才认为当天日线应当可用
+    - 美股：08:00 之后才认为前一美股交易日日线应当可用
+    """
+    today = now.date()
+    if key == "live_cn":
+        if today.weekday() >= 5:
+            return _previous_weekday(today)
+        if now.time() < datetime_time(16, 30):
+            return _previous_weekday(today - timedelta(days=1))
+        return today
+
+    if key == "live_us":
+        offset_days = 1 if now.time() >= datetime_time(8, 0) else 2
+        return _previous_weekday(today - timedelta(days=offset_days))
+
+    return _previous_weekday(today)
 
 
 def _clear_proxy():
@@ -224,6 +264,38 @@ def _restore_proxy(saved: dict):
     os.environ.update(saved)
 
 
+def _validate_positive_series(
+    series: pd.Series, ticker: str, source: str
+) -> pd.Series:
+    """Reject empty or non-positive price series before they enter local truth."""
+    if series.empty:
+        raise RuntimeError(f"{source} returned empty prices for {ticker}")
+
+    numeric = pd.to_numeric(series, errors="coerce").dropna()
+    if numeric.empty:
+        raise RuntimeError(f"{source} returned no numeric prices for {ticker}")
+
+    bad = numeric[numeric <= 0]
+    if not bad.empty:
+        samples = ", ".join(
+            f"{idx.date() if hasattr(idx, 'date') else idx}={value:.4f}"
+            for idx, value in bad.head(5).items()
+        )
+        raise RuntimeError(
+            f"{source} returned non-positive prices for {ticker}: {samples}"
+        )
+
+    return series
+
+
+def _validate_positive_frame(df: pd.DataFrame, source: str) -> pd.DataFrame:
+    """Reject market-level data with zero or negative asset prices."""
+    price_cols = [col for col in df.columns if col != "MONEY"]
+    for col in price_cols:
+        _validate_positive_series(df[col].dropna(), col, source)
+    return df
+
+
 # ── 数据源适配器 ──────────────────────────────────────
 
 
@@ -231,22 +303,24 @@ class DataSource:
     """
     统一数据源接口。
 
-    数据源优先级（akshare 优先，完全避免 yfinance 限流）：
+    数据源优先级：
     - 中国标的：akshare_sina → akshare_em
-    - 美股标的：akshare_us_daily → akshare_us_hist → yfinance（最终 fallback）
+    - 美股标的：Yahoo Adj Close → akshare_us_daily → akshare_us_hist
 
-    yfinance 仅作为最后的兜底手段，正常流程不会触发。
+    注意：akshare 的美股 qfq 长历史可能产生非正价格，不可用于 US ETF 回测。
+    所有来源进入本地 CSV 前都会执行非正价格校验。
     """
 
-    def __init__(self, rate_limiter: RateLimiter):
+    def __init__(self, rate_limiter: RateLimiter, allow_yfinance: bool = True):
         self.rl = rate_limiter
+        self.allow_yfinance = allow_yfinance
 
     def fetch_ticker(self, ticker: str, start: str, end: str) -> pd.Series:
         """
         拉取单个 ticker 的日线数据。
 
         中国标的：akshare_sina → akshare_em（不用 yfinance）
-        美股标的：akshare_us_daily → akshare_us_hist → yfinance（最终 fallback）
+        美股标的：Yahoo Adj Close → akshare_us_daily → akshare_us_hist
         """
         is_cn = ticker.endswith(".SS") or ticker.endswith(".SZ")
 
@@ -262,26 +336,28 @@ class DataSource:
                         self.rl.report_failure(is_rate_limit=True)
             raise RuntimeError(f"{ticker} 所有数据源失败:\n  " + "\n  ".join(errors))
         else:
-            # 美股标的：akshare 优先，yfinance 最终 fallback
+            # 美股 ETF 长历史以 Yahoo Adj Close 为准；akshare 仅作非复权兜底。
             errors = []
-            # 第一优先：akshare（重试2次）
+            if self.allow_yfinance:
+                try:
+                    return self._fetch_yfinance(ticker, start, end)
+                except Exception as e:
+                    errors.append(f"yfinance: {e}")
+                    if _is_rate_limit_error(e):
+                        self.rl.report_failure(is_rate_limit=True)
+            else:
+                errors.append("yfinance_fallback: disabled")
+
             for attempt in range(2):
                 try:
+                    logger.info("    尝试 akshare US 非复权兜底...")
                     return self._fetch_akshare_us(ticker, start, end)
                 except Exception as e:
                     errors.append(f"akshare_us[{attempt + 1}]: {e}")
-            # 最终 fallback：yfinance（仅1次尝试，失败就放弃）
-            try:
-                logger.info(f"    akshare 全部失败，尝试 yfinance fallback...")
-                return self._fetch_yfinance(ticker, start, end)
-            except Exception as e:
-                errors.append(f"yfinance_fallback: {e}")
-                if _is_rate_limit_error(e):
-                    self.rl.report_failure(is_rate_limit=True)
             raise RuntimeError(f"{ticker} 所有数据源失败:\n  " + "\n  ".join(errors))
 
     def _fetch_yfinance(self, ticker: str, start: str, end: str) -> pd.Series:
-        """通过 yfinance 拉取数据（最终 fallback，仅在 akshare 全部失败时使用）。"""
+        """通过 yfinance 拉取 Yahoo Adj Close，作为美股 ETF 长历史首选。"""
         import yfinance as yf
 
         self.rl.wait()
@@ -315,6 +391,7 @@ class DataSource:
 
         s.name = ticker
         s.index.name = "date"
+        s = _validate_positive_series(s, ticker, "yfinance Adj Close")
         self.rl.report_success()
         logger.info(f"    yfinance ✓ {ticker}: {len(s)} 行")
         return s
@@ -341,6 +418,7 @@ class DataSource:
                     if not s.empty:
                         s.name = ticker
                         s.index.name = "date"
+                        s = _validate_positive_series(s, ticker, "akshare_sina")
                         self.rl.report_success()
                         logger.info(f"    akshare_sina ✓ {ticker}: {len(s)} 行")
                         return s
@@ -367,6 +445,7 @@ class DataSource:
 
             s.name = ticker
             s.index.name = "date"
+            s = _validate_positive_series(s, ticker, "akshare_em")
             self.rl.report_success()
             logger.info(f"    akshare_em ✓ {ticker}: {len(s)} 行")
             return s
@@ -379,16 +458,16 @@ class DataSource:
         """
         通过 akshare 拉取美股数据。
 
-        优先使用 stock_us_daily（实测更稳定，无网络问题），
-        失败再尝试 stock_us_hist。
+        仅作为 Yahoo 不可用时的兜底，并使用非复权价格。akshare 的
+        qfq 长历史在 SPY 等高分红 ETF 上可能产生负价格，禁止进入回测数据。
         """
         import akshare as ak
 
         self.rl.wait()
         try:
-            # 方法1: stock_us_daily（实测最稳定，通过新浪源）
+            # 方法1: stock_us_daily（新浪源，非复权兜底）
             try:
-                df = ak.stock_us_daily(symbol=ticker, adjust="qfq")
+                df = ak.stock_us_daily(symbol=ticker, adjust="")
                 if df is not None and not df.empty:
                     df["date"] = pd.to_datetime(df["date"])
                     df = df.set_index("date").sort_index()
@@ -403,6 +482,9 @@ class DataSource:
                     if not s.empty:
                         s.name = ticker
                         s.index.name = "date"
+                        s = _validate_positive_series(
+                            s, ticker, "akshare_us_daily unadjusted"
+                        )
                         self.rl.report_success()
                         logger.info(f"    akshare_us_daily ✓ {ticker}: {len(s)} 行")
                         return s
@@ -416,7 +498,7 @@ class DataSource:
                     period="daily",
                     start_date=start.replace("-", ""),
                     end_date=end.replace("-", ""),
-                    adjust="qfq",
+                    adjust="",
                 )
                 if df is not None and not df.empty:
                     date_col = "日期" if "日期" in df.columns else "date"
@@ -431,6 +513,9 @@ class DataSource:
                     if not s.empty:
                         s.name = ticker
                         s.index.name = "date"
+                        s = _validate_positive_series(
+                            s, ticker, "akshare_us_hist unadjusted"
+                        )
                         self.rl.report_success()
                         logger.info(f"    akshare_us_hist ✓ {ticker}: {len(s)} 行")
                         return s
@@ -459,9 +544,16 @@ class DataManager:
     5. 单 ticker 失败不崩溃（跳过 + 用本地缓存兜底）
     """
 
-    def __init__(self, min_interval: float = 3.0, max_hourly: int = 60):
+    def __init__(
+        self,
+        min_interval: float = 3.0,
+        max_hourly: int = 60,
+        allow_yfinance: bool = True,
+        cooldown_hours: int = 12,
+    ):
         self.rl = RateLimiter(min_interval=min_interval, max_hourly_requests=max_hourly)
-        self.source = DataSource(self.rl)
+        self.source = DataSource(self.rl, allow_yfinance=allow_yfinance)
+        self.cooldown_hours = cooldown_hours
         RAW_DIR.mkdir(parents=True, exist_ok=True)
 
     # ── 本地数据加载（回测专用，零 API 调用）─────────
@@ -484,6 +576,7 @@ class DataManager:
             )
 
         prices = pd.read_csv(csv_path, index_col="date", parse_dates=True).sort_index()
+        _validate_positive_frame(prices, f"local market file {csv_path.name}")
         logger.info(f"加载本地数据: {market} ({csv_path.name}, {len(prices)} 行)")
         return prices
 
@@ -502,6 +595,7 @@ class DataManager:
             )
 
         prices = pd.read_csv(csv_path, index_col="date", parse_dates=True).sort_index()
+        _validate_positive_frame(prices, f"local live file {csv_path.name}")
 
         # 中国组合模拟货币基金
         if portfolio == "cn" and "MONEY" not in prices.columns:
@@ -627,27 +721,28 @@ class DataManager:
                 return cached
 
         # 增量更新
-        inc_start = (last_date - timedelta(days=5)).strftime("%Y-%m-%d")
-        logger.info(f"  {ticker}: 增量更新 {inc_start} → {end} (本地 {len(cached)} 行)")
-        # 添加网络重试机制
-        max_retries = 3
-        for retry in range(max_retries):
-            try:
-                new_data = self.source.fetch_ticker(ticker, inc_start, end)
-                merged = pd.concat([cached, new_data]).sort_index()
-                merged = merged[~merged.index.duplicated(keep="last")]
-                merged = merged[merged.index >= pd.Timestamp(start)].dropna()
-                self._save_raw(merged, raw_path)
-                logger.info(f"  {ticker}: ✓ 更新完成 ({len(merged)} 行)")
-                return merged
-            except Exception as e:
-                if retry == max_retries - 1:  # 最后一次重试也失败
-                    logger.warning(f"  {ticker}: ✗ 增量更新失败 ({e})，使用本地缓存")
-                    return cached[cached.index >= pd.Timestamp(start)]
-                logger.warning(
-                    f"  {ticker}: 网络错误，{retry + 1}/{max_retries} 次重试中: {e}"
-                )
-                time.sleep(10 * (retry + 1))  # 递增等待时间
+        if cached is not None and not cached.empty:
+            inc_start = (last_date - timedelta(days=5)).strftime("%Y-%m-%d")
+            logger.info(f"  {ticker}: 增量更新 {inc_start} → {end} (本地 {len(cached)} 行)")
+            # 添加网络重试机制
+            max_retries = 3
+            for retry in range(max_retries):
+                try:
+                    new_data = self.source.fetch_ticker(ticker, inc_start, end)
+                    merged = pd.concat([cached, new_data]).sort_index()
+                    merged = merged[~merged.index.duplicated(keep="last")]
+                    merged = merged[merged.index >= pd.Timestamp(start)].dropna()
+                    self._save_raw(merged, raw_path)
+                    logger.info(f"  {ticker}: ✓ 更新完成 ({len(merged)} 行)")
+                    return merged
+                except Exception as e:
+                    if retry == max_retries - 1:  # 最后一次重试也失败
+                        logger.warning(f"  {ticker}: ✗ 增量更新失败 ({e})，使用本地缓存")
+                        return cached[cached.index >= pd.Timestamp(start)]
+                    logger.warning(
+                        f"  {ticker}: 网络错误，{retry + 1}/{max_retries} 次重试中: {e}"
+                    )
+                    time.sleep(10 * (retry + 1))  # 递增等待时间
 
         # 无缓存，全量下载
         logger.info(f"  {ticker}: 首次下载 {start} → {end}")
@@ -731,6 +826,7 @@ class DataManager:
                 prices["MONEY"] = money
 
             prices.index.name = "date"
+            _validate_positive_frame(prices, f"assembled market {m}")
             out_path = DATA_DIR / cfg["file"]
             prices.to_csv(out_path)
             logger.info(f"  ✓ {m}: {out_path.name} ({len(prices)} 行)")
@@ -747,22 +843,28 @@ class DataManager:
             logger.warning(f"  可稍后重试: python -m data.data_manager --update")
         logger.info(f"\n✓ 完成")
 
-    def update_live(self):
+    def update_live(self, force: bool = False, now: Optional[datetime] = None) -> dict:
         """
         更新 live 数据（每日运行用）。
 
         策略：优先用 raw 缓存裁剪出 live 数据（零 API 调用），
         只有 raw 缓存太旧时才联网拉增量。
-        周末/节假日缓存 ≤ 3 天陈旧视为正常（非交易日）。
+        根据当前时刻估算最新应可用交易日，避免在收盘前请求不存在的数据。
         """
         logger.info(f"\n更新 Live 数据...")
-        end = datetime.now()
-        stale_threshold = 3  # 非交易日容忍天数
+        end = now or datetime.now()
+        summary = {
+            "updated_files": [],
+            "api_attempted": 0,
+            "cooldown_active": False,
+            "timestamp_updated": False,
+        }
 
         for key, cfg in LIVE_CONFIGS.items():
             lookback = cfg["lookback_days"]
             start = (end - timedelta(days=lookback + 10)).strftime("%Y-%m-%d")
             end_str = end.strftime("%Y-%m-%d")
+            expected_date = _expected_live_date(key, end)
 
             frames = {}
             tickers_needing_api = []
@@ -773,22 +875,38 @@ class DataManager:
                 cached = self._load_raw(raw_path, ticker)
                 if cached is not None and not cached.empty:
                     last_date = cached.index.max()
-                    days_stale = (pd.Timestamp(end_str) - last_date).days
-                    if days_stale <= stale_threshold:
+                    if not force and last_date.date() >= expected_date:
                         trimmed = cached[cached.index >= pd.Timestamp(start)]
                         if not trimmed.empty:
                             frames[ticker] = trimmed
                             logger.info(
                                 f"  {ticker}: 从 raw 缓存裁剪 ({len(trimmed)} 行, "
-                                f"截至 {last_date.date()})"
+                                f"截至 {last_date.date()}，预期 {expected_date})"
                             )
                             continue
                 tickers_needing_api.append(ticker)
 
             # 需要联网的 ticker
+            cooldown = self._active_fetch_cooldown(end)
+            if tickers_needing_api and cooldown and not force:
+                summary["cooldown_active"] = True
+                until, reason = cooldown
+                logger.warning(f"  数据源冷却中，跳过联网请求至 {until} ({reason})")
+
             for ticker in tickers_needing_api:
+                if cooldown and not force:
+                    raw_path = RAW_DIR / f"{ticker}.csv"
+                    cached = self._load_raw(raw_path, ticker)
+                    if cached is not None:
+                        trimmed = cached[cached.index >= pd.Timestamp(start)]
+                        if not trimmed.empty:
+                            frames[ticker] = trimmed
+                            logger.warning(f"  {ticker}: 冷却期内使用 raw 缓存兜底")
+                    continue
+
                 logger.info(f"  {ticker}: 需要联网更新...")
                 try:
+                    summary["api_attempted"] += 1
                     data = self.source.fetch_ticker(ticker, start, end_str)
                     frames[ticker] = data
                     # 同时更新 raw 缓存
@@ -803,6 +921,10 @@ class DataManager:
                         data_copy.name = ticker
                         self._save_raw(data_copy, raw_path)
                 except Exception as e:
+                    if _is_rate_limit_error(e):
+                        self._record_fetch_cooldown(e, end)
+                        cooldown = self._active_fetch_cooldown(end)
+                        summary["cooldown_active"] = True
                     # 用 raw 缓存兜底（即使稍旧）
                     raw_path = RAW_DIR / f"{ticker}.csv"
                     cached = self._load_raw(raw_path, ticker)
@@ -817,15 +939,26 @@ class DataManager:
                     logger.error(f"  {ticker}: 无法获取数据且无本地缓存")
 
             if frames:
-                prices = pd.DataFrame(frames).ffill().bfill().dropna()
+                ordered_frames = {t: frames[t] for t in cfg["tickers"] if t in frames}
+                prices = pd.DataFrame(ordered_frames).ffill().bfill().dropna()
                 prices.index.name = "date"
+                _validate_positive_frame(prices, f"assembled live {key}")
                 out_path = DATA_DIR / cfg["file"]
-                prices.to_csv(out_path)
-                logger.info(f"  ✓ {out_path.name} ({len(prices)} 行)")
+                if self._write_csv_if_changed(prices, out_path):
+                    summary["updated_files"].append(cfg["file"])
+                    logger.info(f"  ✓ {out_path.name} ({len(prices)} 行，已更新)")
+                else:
+                    logger.info(f"  {out_path.name}: 内容无变化，跳过写入")
 
         # 更新时间戳
-        ts_path = DATA_DIR / "last_update.txt"
-        ts_path.write_text(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        if summary["updated_files"]:
+            ts_path = DATA_DIR / "last_update.txt"
+            ts_path.write_text(end.strftime("%Y-%m-%d %H:%M:%S"), encoding="utf-8")
+            summary["timestamp_updated"] = True
+        else:
+            logger.info("Live 数据文件无变化，不更新 last_update.txt")
+
+        return summary
 
     # ── 数据状态 ──────────────────────────────────────
 
@@ -883,6 +1016,7 @@ class DataManager:
             col = "adj_close" if "adj_close" in df.columns else df.columns[0]
             s = df[col].copy()
             s.name = ticker
+            s = _validate_positive_series(s, ticker, f"raw cache {path.name}")
             return s
         except Exception as e:
             logger.warning(f"读取 {path} 失败: {e}")
@@ -890,9 +1024,58 @@ class DataManager:
 
     def _save_raw(self, series: pd.Series, path: Path):
         """保存 raw ticker 数据。"""
+        ticker = series.name or path.stem
+        series = _validate_positive_series(series.dropna(), ticker, f"raw write {path.name}")
         df = series.to_frame("adj_close")
         df.index.name = "date"
         df.sort_index().to_csv(path)
+
+    def _write_csv_if_changed(self, df: pd.DataFrame, path: Path) -> bool:
+        """Only rewrite CSV when content changed, so scheduled jobs do not push noise."""
+        content = df.to_csv(lineterminator="\n")
+        if path.exists() and path.read_text(encoding="utf-8") == content:
+            return False
+        path.write_text(content, encoding="utf-8")
+        return True
+
+    def _load_fetch_state(self) -> dict:
+        if not FETCH_STATE_FILE.exists():
+            return {}
+        try:
+            return json.loads(FETCH_STATE_FILE.read_text(encoding="utf-8"))
+        except Exception as e:
+            logger.warning(f"读取数据源状态失败: {e}")
+            return {}
+
+    def _active_fetch_cooldown(
+        self, now: Optional[datetime] = None
+    ) -> Optional[tuple[str, str]]:
+        state = self._load_fetch_state()
+        until_raw = state.get("cooldown_until")
+        if not until_raw:
+            return None
+        try:
+            until = datetime.fromisoformat(until_raw)
+        except ValueError:
+            return None
+        now = now or datetime.now()
+        if now < until:
+            return until.strftime("%Y-%m-%d %H:%M:%S"), state.get("reason", "rate limit")
+        return None
+
+    def _record_fetch_cooldown(self, error: Exception, now: Optional[datetime] = None):
+        now = now or datetime.now()
+        until = now + timedelta(hours=self.cooldown_hours)
+        payload = {
+            "cooldown_until": until.isoformat(timespec="seconds"),
+            "reason": str(error)[:500],
+            "recorded_at": now.isoformat(timespec="seconds"),
+        }
+        FETCH_STATE_FILE.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        logger.warning(f"数据源疑似限流，进入冷却至 {until:%Y-%m-%d %H:%M:%S}")
 
     def _generate_etf_daily(self, ticker_data: dict[str, pd.Series]):
         """生成 etf_daily.csv（兼容旧版回测脚本）。"""
@@ -901,6 +1084,7 @@ class DataManager:
             frames = {t: ticker_data[t] for t in us_tickers}
             etf = pd.DataFrame(frames).sort_index().ffill().bfill().dropna()
             etf.index.name = "date"
+            _validate_positive_frame(etf, "assembled etf_daily")
             out_path = DATA_DIR / "etf_daily.csv"
             etf.to_csv(out_path)
             logger.info(f"  ✓ etf_daily.csv ({len(etf)} 行) [兼容旧版]")
@@ -910,17 +1094,9 @@ class DataManager:
         status = {
             "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "markets_updated": markets,
-            "tickers": {},
+            "tickers": self._raw_ticker_metadata(),
             "rate_limiter": self.rl.stats,
         }
-        for t, s in ticker_data.items():
-            raw_path = RAW_DIR / f"{t}.csv"
-            status["tickers"][t] = {
-                "rows": len(s),
-                "start": str(s.index.min().date()),
-                "end": str(s.index.max().date()),
-                "sha256": self._sha256(raw_path) if raw_path.exists() else None,
-            }
         with STATUS_FILE.open("w", encoding="utf-8") as f:
             json.dump(status, f, ensure_ascii=False, indent=2)
 
@@ -939,17 +1115,9 @@ class DataManager:
             "generated_at_utc": datetime.now().isoformat(),
             "source": "data_manager_v2",
             "policy": {"backtest_mode": "local_only"},
-            "tickers": {},
+            "tickers": self._raw_ticker_metadata(),
             "markets": {},
         }
-        for t, s in ticker_data.items():
-            raw_path = RAW_DIR / f"{t}.csv"
-            payload["tickers"][t] = {
-                "rows": int(len(s)),
-                "start": str(s.index.min().date()),
-                "end": str(s.index.max().date()),
-                "sha256": self._sha256(raw_path) if raw_path.exists() else None,
-            }
         for m in markets:
             cfg = MARKET_CONFIGS[m]
             p = DATA_DIR / cfg["file"]
@@ -966,6 +1134,22 @@ class DataManager:
         with manifest_path.open("w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
         logger.info(f"  ✓ data_manifest.json 已更新")
+
+    def _raw_ticker_metadata(self) -> dict[str, dict]:
+        """Return audit metadata for every tracked raw CSV cache."""
+        tickers: dict[str, dict] = {}
+        for raw_path in sorted(RAW_DIR.glob("*.csv")):
+            ticker = raw_path.stem
+            series = self._load_raw(raw_path, ticker)
+            if series is None or series.empty:
+                raise RuntimeError(f"raw cache {raw_path.name} cannot be audited")
+            tickers[ticker] = {
+                "rows": int(len(series)),
+                "start": str(series.index.min().date()),
+                "end": str(series.index.max().date()),
+                "sha256": self._sha256(raw_path),
+            }
+        return tickers
 
 
 # ── CLI 入口 ──────────────────────────────────────────
@@ -1013,9 +1197,28 @@ def main():
         default=60,
         help="每小时最大请求数（默认 60）",
     )
+    parser.add_argument(
+        "--allow-yfinance",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--no-yfinance",
+        action="store_true",
+        help="禁用 Yahoo/yfinance；美股 ETF 将只使用 akshare 非复权兜底",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="忽略交易时段判断和冷却状态，强制联网更新 live 数据",
+    )
     args = parser.parse_args()
 
-    dm = DataManager(min_interval=args.min_interval, max_hourly=args.max_hourly)
+    dm = DataManager(
+        min_interval=args.min_interval,
+        max_hourly=args.max_hourly,
+        allow_yfinance=not args.no_yfinance,
+    )
 
     if args.status:
         status = dm.status()
@@ -1043,7 +1246,7 @@ def main():
         return
 
     if args.update_live:
-        dm.update_live()
+        dm.update_live(force=args.force)
         return
 
     if args.update is not None:

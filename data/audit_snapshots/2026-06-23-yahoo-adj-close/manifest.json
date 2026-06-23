@@ -1,0 +1,41 @@
+{
+  "snapshot": "2026-06-23-yahoo-adj-close",
+  "source": "Yahoo Adj Close",
+  "created_at": "2026-06-23",
+  "policy": {
+    "purpose": "frozen research audit input",
+    "routine_refresh_allowed": false
+  },
+  "tickers": {
+    "AGG": {
+      "rows": 5366,
+      "start": "2005-01-03",
+      "end": "2026-05-01",
+      "sha256": "e6e00c6ac6938e0a94cee35d7f2772f724edb8ba22cf2f9f5ee7af824c98ae48"
+    },
+    "IEF": {
+      "rows": 5366,
+      "start": "2005-01-03",
+      "end": "2026-05-01",
+      "sha256": "63838de0627dd7e5374a448a7d3f5b57cc944e2c30fe9a0175b0b69bbed4f5c8"
+    },
+    "QQQ": {
+      "rows": 5366,
+      "start": "2005-01-03",
+      "end": "2026-05-01",
+      "sha256": "2f5272850994ea4bf017d0c33627092b5859ff36281cfdbce147a2e1fad45da1"
+    },
+    "SMH": {
+      "rows": 5366,
+      "start": "2005-01-03",
+      "end": "2026-05-01",
+      "sha256": "7004e1dcebe910532d6b3c8fd6e3d1cd76ac8f3709589406a65947e31d00b356"
+    },
+    "VTI": {
+      "rows": 5366,
+      "start": "2005-01-03",
+      "end": "2026-05-01",
+      "sha256": "106e0a68de0d55b5a717457fafb358cf7f16c0df6cfef803cf3ebb99f2f16139"
+    }
+  }
+}

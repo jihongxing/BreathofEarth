@@ -19,12 +19,19 @@ async def login(req: LoginRequest, db: Database = Depends(get_db)):
     if not user or not verify_password(req.password, user["password_hash"]):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户名或密码错误")
 
-    token = create_access_token({"sub": user["username"], "role": user["role"]})
+    token = create_access_token(
+        {
+            "sub": user["username"],
+            "role": user["role"],
+            "member_id": user.get("member_id"),
+        }
+    )
     db.save_audit_log("LOGIN", user["username"], "登录成功")
     return LoginResponse(
         access_token=token,
         role=user["role"],
         display_name=user.get("display_name") or user["username"],
+        member_id=user.get("member_id"),
     )
 
 
@@ -32,8 +39,10 @@ async def login(req: LoginRequest, db: Database = Depends(get_db)):
 async def get_me(user: dict = Depends(get_current_user)):
     """获取当前用户信息"""
     return {
+        "id": user["id"],
         "username": user["username"],
         "role": user["role"],
         "display_name": user.get("display_name") or user["username"],
         "email": user.get("email", ""),
+        "member_id": user.get("member_id"),
     }

@@ -26,10 +26,18 @@ db/backups/
 data/etf_daily.csv
 data/cpi_monthly.csv
 data/monthly_aligned.csv
+data/raw/*.csv
+!data/audit_snapshots/**/*.csv
+data/benchmarks/*.csv
 # 注意：data/live_*.csv 和 data/last_update.txt 不排除，它们是数据管道的一部分
+data/data_fetch_state.json
 
 # 回测输出
 backtest/output/
+
+# 影子审计与前端报告输出（可重新生成）
+data/shadow/
+frontend/reports/
 
 # 运行日志
 logs/
@@ -46,3 +54,6 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
+
+# 本地 QA / 浏览器验证产物
+output/

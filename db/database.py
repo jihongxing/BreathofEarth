@@ -24,6 +24,7 @@ DB_PATH = Path(__file__).parent / "xirang.db"
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 SCHEMA_TAX_HARVEST_PATH = Path(__file__).parent / "schema_tax_harvest.sql"
 SCHEMA_GOVERNANCE_PATH = Path(__file__).parent / "schema_governance.sql"
+SCHEMA_FAMILY_OFFICE_PATH = Path(__file__).parent / "schema_family_office.sql"
 SCHEMA_ALPHA_PATH = Path(__file__).parent / "schema_alpha.sql"
 SCHEMA_BROKER_SYNC_PATH = Path(__file__).parent / "schema_broker_sync.sql"
 SCHEMA_SHADOW_RUN_PATH = Path(__file__).parent / "schema_shadow_run.sql"
@@ -52,6 +53,11 @@ class Database:
             # 加载治理层扩展表
             if SCHEMA_GOVERNANCE_PATH.exists():
                 conn.executescript(SCHEMA_GOVERNANCE_PATH.read_text(encoding="utf-8"))
+                self._migrate_governance_schema(conn)
+            # 加载家族办公室平台化扩展表
+            if SCHEMA_FAMILY_OFFICE_PATH.exists():
+                conn.executescript(SCHEMA_FAMILY_OFFICE_PATH.read_text(encoding="utf-8"))
+                self._migrate_family_office_schema(conn)
             # 加载 Alpha 沙盒扩展表
             if SCHEMA_ALPHA_PATH.exists():
                 conn.executescript(SCHEMA_ALPHA_PATH.read_text(encoding="utf-8"))
@@ -76,6 +82,155 @@ class Database:
     def _table_columns(self, conn, table_name: str) -> list[dict]:
         rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
         return [dict(r) for r in rows]
+
+    def _migrate_governance_schema(self, conn):
+        """迁移治理层用户表，为平台化账户模型补齐身份绑定字段。"""
+        if self._table_exists(conn, "api_users"):
+            user_cols = {c["name"] for c in self._table_columns(conn, "api_users")}
+            if "member_id" not in user_cols:
+                conn.execute("ALTER TABLE api_users ADD COLUMN member_id TEXT")
+        if self._table_exists(conn, "withdrawal_requests"):
+            withdrawal_cols = {c["name"] for c in self._table_columns(conn, "withdrawal_requests")}
+            migrations = {
+                "family_office_id": "ALTER TABLE withdrawal_requests ADD COLUMN family_office_id TEXT NOT NULL DEFAULT 'default'",
+                "account_id": "ALTER TABLE withdrawal_requests ADD COLUMN account_id TEXT",
+                "member_id": "ALTER TABLE withdrawal_requests ADD COLUMN member_id TEXT",
+                "requested_by_user_id": "ALTER TABLE withdrawal_requests ADD COLUMN requested_by_user_id INTEGER",
+                "approved_by_user_id": "ALTER TABLE withdrawal_requests ADD COLUMN approved_by_user_id INTEGER",
+                "source_pool_id": "ALTER TABLE withdrawal_requests ADD COLUMN source_pool_id TEXT",
+                "currency": "ALTER TABLE withdrawal_requests ADD COLUMN currency TEXT NOT NULL DEFAULT 'USD'",
+                "shares_requested": "ALTER TABLE withdrawal_requests ADD COLUMN shares_requested REAL NOT NULL DEFAULT 0",
+                "share_price": "ALTER TABLE withdrawal_requests ADD COLUMN share_price REAL",
+                "shares_redeemed": "ALTER TABLE withdrawal_requests ADD COLUMN shares_redeemed REAL NOT NULL DEFAULT 0",
+                "executed_by": "ALTER TABLE withdrawal_requests ADD COLUMN executed_by TEXT",
+                "ledger_entry_id": "ALTER TABLE withdrawal_requests ADD COLUMN ledger_entry_id TEXT",
+            }
+            for column, sql in migrations.items():
+                if column not in withdrawal_cols:
+                    conn.execute(sql)
+            conn.execute(
+                "UPDATE withdrawal_requests SET source_pool_id = portfolio_id WHERE source_pool_id IS NULL"
+            )
+            conn.execute(
+                """CREATE INDEX IF NOT EXISTS idx_withdrawal_requests_account
+                   ON withdrawal_requests(account_id, status, created_at)"""
+            )
+            conn.execute(
+                """CREATE INDEX IF NOT EXISTS idx_withdrawal_requests_pool
+                   ON withdrawal_requests(source_pool_id, status, created_at)"""
+            )
+        if self._table_exists(conn, "withdrawal_approvals"):
+            approval_cols = {c["name"] for c in self._table_columns(conn, "withdrawal_approvals")}
+            migrations = {
+                "approver_user_id": "ALTER TABLE withdrawal_approvals ADD COLUMN approver_user_id INTEGER",
+                "approver_role": "ALTER TABLE withdrawal_approvals ADD COLUMN approver_role TEXT",
+            }
+            for column, sql in migrations.items():
+                if column not in approval_cols:
+                    conn.execute(sql)
+
+    def _migrate_family_office_schema(self, conn):
+        """迁移家族办公室扩展表，保持旧入金记录可兼容读取。"""
+        if self._table_exists(conn, "deposit_records"):
+            deposit_cols = {c["name"] for c in self._table_columns(conn, "deposit_records")}
+            migrations = {
+                "account_id": "ALTER TABLE deposit_records ADD COLUMN account_id TEXT",
+                "deposit_request_id": "ALTER TABLE deposit_records ADD COLUMN deposit_request_id TEXT",
+                "ledger_entry_id": "ALTER TABLE deposit_records ADD COLUMN ledger_entry_id TEXT",
+                "shares_issued": "ALTER TABLE deposit_records ADD COLUMN shares_issued REAL NOT NULL DEFAULT 0",
+                "share_price": "ALTER TABLE deposit_records ADD COLUMN share_price REAL",
+            }
+            for column, sql in migrations.items():
+                if column not in deposit_cols:
+                    conn.execute(sql)
+        if self._table_exists(conn, "deposit_requests"):
+            request_cols = {c["name"] for c in self._table_columns(conn, "deposit_requests")}
+            migrations = {
+                "rejected_by": "ALTER TABLE deposit_requests ADD COLUMN rejected_by TEXT",
+                "rejected_at": "ALTER TABLE deposit_requests ADD COLUMN rejected_at TEXT",
+                "external_reference": "ALTER TABLE deposit_requests ADD COLUMN external_reference TEXT",
+                "allocation": "ALTER TABLE deposit_requests ADD COLUMN allocation TEXT",
+                "legacy_deposit_record_id": "ALTER TABLE deposit_requests ADD COLUMN legacy_deposit_record_id TEXT",
+            }
+            for column, sql in migrations.items():
+                if column not in request_cols:
+                    conn.execute(sql)
+        if self._table_exists(conn, "ledger_entries"):
+            ledger_cols = {c["name"]: c for c in self._table_columns(conn, "ledger_entries")}
+            if ledger_cols.get("id", {}).get("type", "").upper() != "INTEGER":
+                self._rebuild_family_ledger_entries(conn)
+                ledger_cols = {c["name"]: c for c in self._table_columns(conn, "ledger_entries")}
+            migrations = {
+                "portfolio_id": "ALTER TABLE ledger_entries ADD COLUMN portfolio_id TEXT",
+                "pool_id": "ALTER TABLE ledger_entries ADD COLUMN pool_id TEXT",
+                "memo": "ALTER TABLE ledger_entries ADD COLUMN memo TEXT",
+            }
+            for column, sql in migrations.items():
+                if column not in ledger_cols:
+                    conn.execute(sql)
+        if self._table_exists(conn, "investment_pools"):
+            pool_cols = {c["name"] for c in self._table_columns(conn, "investment_pools")}
+            migrations = {
+                "family_office_id": "ALTER TABLE investment_pools ADD COLUMN family_office_id TEXT NOT NULL DEFAULT 'default'",
+                "portfolio_id": "ALTER TABLE investment_pools ADD COLUMN portfolio_id TEXT NOT NULL DEFAULT 'us'",
+                "pool_type": "ALTER TABLE investment_pools ADD COLUMN pool_type TEXT NOT NULL DEFAULT 'core'",
+                "currency": "ALTER TABLE investment_pools ADD COLUMN currency TEXT NOT NULL DEFAULT 'USD'",
+                "nav": "ALTER TABLE investment_pools ADD COLUMN nav REAL NOT NULL DEFAULT 0",
+                "shares_outstanding": "ALTER TABLE investment_pools ADD COLUMN shares_outstanding REAL NOT NULL DEFAULT 0",
+                "share_price": "ALTER TABLE investment_pools ADD COLUMN share_price REAL NOT NULL DEFAULT 100",
+                "status": "ALTER TABLE investment_pools ADD COLUMN status TEXT NOT NULL DEFAULT 'ACTIVE'",
+                "last_valued_at": "ALTER TABLE investment_pools ADD COLUMN last_valued_at TEXT",
+            }
+            for column, sql in migrations.items():
+                if column not in pool_cols:
+                    conn.execute(sql)
+
+    def _rebuild_family_ledger_entries(self, conn):
+        """重建早期文本主键版本的家族总账，改为自增主键。"""
+        conn.execute("ALTER TABLE ledger_entries RENAME TO ledger_entries_legacy")
+        conn.executescript(
+            """
+            CREATE TABLE ledger_entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                family_office_id TEXT NOT NULL DEFAULT 'default',
+                account_id TEXT NOT NULL,
+                portfolio_id TEXT,
+                pool_id TEXT,
+                entry_type TEXT NOT NULL,
+                amount REAL NOT NULL DEFAULT 0,
+                currency TEXT NOT NULL DEFAULT 'USD',
+                shares_delta REAL,
+                share_price REAL,
+                actor TEXT NOT NULL,
+                source_ref_type TEXT,
+                source_ref_id TEXT,
+                memo TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """
+        )
+        legacy_cols = {c["name"] for c in self._table_columns(conn, "ledger_entries_legacy")}
+        select_portfolio = "portfolio_id" if "portfolio_id" in legacy_cols else "NULL"
+        select_pool = "pool_id" if "pool_id" in legacy_cols else "NULL"
+        select_memo = "memo" if "memo" in legacy_cols else (
+            "metadata" if "metadata" in legacy_cols else "NULL"
+        )
+        conn.execute(
+            f"""
+            INSERT INTO ledger_entries (
+                family_office_id, account_id, portfolio_id, pool_id, entry_type,
+                amount, currency, shares_delta, share_price, actor,
+                source_ref_type, source_ref_id, memo, created_at
+            )
+            SELECT
+                family_office_id, account_id, {select_portfolio}, {select_pool}, entry_type,
+                amount, currency, shares_delta, share_price, actor,
+                source_ref_type, source_ref_id, {select_memo}, created_at
+            FROM ledger_entries_legacy
+            WHERE account_id IS NOT NULL
+            """
+        )
+        conn.execute("DROP TABLE ledger_entries_legacy")
 
     def _migrate_alpha_schema(self, conn):
         """将旧版 Alpha 表迁移到按 portfolio_id 隔离的新结构。"""
@@ -1111,20 +1266,49 @@ class Database:
         portfolio_id: str = "us",
         required_approvals: int = 2,
         cooling_days: int = 7,
+        account_id: str | None = None,
+        member_id: str | None = None,
+        requested_by_user_id: int | None = None,
+        source_pool_id: str | None = None,
+        currency: str = "USD",
+        shares_requested: float = 0.0,
+        share_price: float | None = None,
+        family_office_id: str = "default",
         conn=None,
-    ):
+    ) -> dict:
         """创建出金请求"""
         sql = """INSERT INTO withdrawal_requests
-                   (id, portfolio_id, amount, reason, requester,
-                    required_approvals, cooling_days, expires_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)"""
-        values = (withdrawal_id, portfolio_id, amount, reason, requester,
-                  required_approvals, cooling_days, expires_at)
+                   (id, family_office_id, account_id, member_id, requested_by_user_id,
+                    portfolio_id, source_pool_id, amount, currency, shares_requested,
+                    share_price, reason, requester, required_approvals, cooling_days, expires_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+        values = (
+            withdrawal_id,
+            family_office_id,
+            account_id,
+            member_id,
+            requested_by_user_id,
+            portfolio_id,
+            source_pool_id or portfolio_id,
+            round(float(amount), 2),
+            currency,
+            round(float(shares_requested), 8),
+            share_price,
+            reason,
+            requester,
+            required_approvals,
+            cooling_days,
+            expires_at,
+        )
         if conn:
             conn.execute(sql, values)
+            row = conn.execute("SELECT * FROM withdrawal_requests WHERE id = ?", (withdrawal_id,)).fetchone()
+            return dict(row) if row else {"id": withdrawal_id}
         else:
             with self._conn() as c:
                 c.execute(sql, values)
+                row = c.execute("SELECT * FROM withdrawal_requests WHERE id = ?", (withdrawal_id,)).fetchone()
+                return dict(row) if row else {"id": withdrawal_id}
 
     def get_withdrawal_request(self, withdrawal_id: str) -> Optional[dict]:
         with self._conn() as conn:
@@ -1133,18 +1317,37 @@ class Database:
             ).fetchone()
             return dict(row) if row else None
 
-    def list_withdrawal_requests(self, status: Optional[str] = None, limit: int = 20) -> list[dict]:
+    def list_withdrawal_requests(
+        self,
+        status: Optional[str] = None,
+        portfolio_id: str | None = None,
+        account_id: str | None = None,
+        account_ids: list[str] | None = None,
+        limit: int = 20,
+    ) -> list[dict]:
         with self._conn() as conn:
+            conditions = []
+            values = []
             if status:
-                rows = conn.execute(
-                    "SELECT * FROM withdrawal_requests WHERE status = ? ORDER BY created_at DESC LIMIT ?",
-                    (status, limit),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT * FROM withdrawal_requests ORDER BY created_at DESC LIMIT ?",
-                    (limit,),
-                ).fetchall()
+                conditions.append("status = ?")
+                values.append(status)
+            if portfolio_id:
+                conditions.append("portfolio_id = ?")
+                values.append(portfolio_id)
+            if account_id:
+                conditions.append("account_id = ?")
+                values.append(account_id)
+            if account_ids is not None:
+                if not account_ids:
+                    return []
+                placeholders = ", ".join("?" for _ in account_ids)
+                conditions.append(f"account_id IN ({placeholders})")
+                values.extend(account_ids)
+            where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+            rows = conn.execute(
+                f"SELECT * FROM withdrawal_requests {where} ORDER BY created_at DESC LIMIT ?",
+                values + [limit],
+            ).fetchall()
             return [dict(r) for r in rows]
 
     def update_withdrawal_status(self, withdrawal_id: str, status: str, conn=None):
@@ -1156,39 +1359,95 @@ class Database:
             with self._conn() as c:
                 c.execute(sql, values)
 
-    def save_deposit_record(
-        self, deposit_id: str, amount: float, depositor: str,
-        portfolio_id: str = "us", allocation: str = "", conn=None,
-    ):
-        sql = """INSERT INTO deposit_records (id, portfolio_id, amount, depositor, allocation)
-                 VALUES (?, ?, ?, ?, ?)"""
-        values = (deposit_id, portfolio_id, amount, depositor, allocation)
+    def update_withdrawal_request(self, withdrawal_id: str, conn=None, **kwargs):
+        if not kwargs:
+            return
+        sets = ", ".join(f"{key} = ?" for key in kwargs)
+        values = list(kwargs.values()) + [withdrawal_id]
+        sql = f"""UPDATE withdrawal_requests
+                  SET {sets}, updated_at = CURRENT_TIMESTAMP
+                  WHERE id = ?"""
         if conn:
             conn.execute(sql, values)
         else:
             with self._conn() as c:
                 c.execute(sql, values)
 
-    def list_deposit_records(self, portfolio_id: str = None, limit: int = 20) -> list[dict]:
+    def save_deposit_record(
+        self, deposit_id: str, amount: float, depositor: str,
+        portfolio_id: str = "us", allocation: str = "", conn=None,
+        account_id: str | None = None,
+        deposit_request_id: str | None = None,
+        ledger_entry_id: str | None = None,
+        shares_issued: float = 0.0,
+        share_price: float | None = None,
+    ):
+        sql = """INSERT INTO deposit_records (
+                    id, portfolio_id, account_id, deposit_request_id, ledger_entry_id,
+                    amount, depositor, allocation, shares_issued, share_price
+                 )
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+        values = (
+            deposit_id,
+            portfolio_id,
+            account_id,
+            deposit_request_id,
+            ledger_entry_id,
+            amount,
+            depositor,
+            allocation,
+            shares_issued,
+            share_price,
+        )
+        if conn:
+            conn.execute(sql, values)
+        else:
+            with self._conn() as c:
+                c.execute(sql, values)
+
+    def list_deposit_records(
+        self,
+        portfolio_id: str = None,
+        account_id: str | None = None,
+        account_ids: list[str] | None = None,
+        limit: int = 20,
+    ) -> list[dict]:
         with self._conn() as conn:
+            conditions = []
+            values = []
             if portfolio_id:
-                rows = conn.execute(
-                    "SELECT * FROM deposit_records WHERE portfolio_id = ? ORDER BY created_at DESC LIMIT ?",
-                    (portfolio_id, limit),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT * FROM deposit_records ORDER BY created_at DESC LIMIT ?",
-                    (limit,),
-                ).fetchall()
+                conditions.append("portfolio_id = ?")
+                values.append(portfolio_id)
+            if account_id:
+                conditions.append("account_id = ?")
+                values.append(account_id)
+            if account_ids is not None:
+                if not account_ids:
+                    return []
+                placeholders = ", ".join("?" for _ in account_ids)
+                conditions.append(f"account_id IN ({placeholders})")
+                values.extend(account_ids)
+            where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+            rows = conn.execute(
+                f"SELECT * FROM deposit_records {where} ORDER BY created_at DESC LIMIT ?",
+                values + [limit],
+            ).fetchall()
             return [dict(r) for r in rows]
 
     def add_withdrawal_approval(
-        self, withdrawal_id: str, approver: str, decision: str = "APPROVED", comment: str = "", conn=None
+        self,
+        withdrawal_id: str,
+        approver: str,
+        decision: str = "APPROVED",
+        comment: str = "",
+        approver_user_id: int | None = None,
+        approver_role: str | None = None,
+        conn=None,
     ):
         sql = """INSERT OR REPLACE INTO withdrawal_approvals
-                   (withdrawal_id, approver, decision, comment) VALUES (?, ?, ?, ?)"""
-        values = (withdrawal_id, approver, decision, comment)
+                   (withdrawal_id, approver, approver_user_id, approver_role, decision, comment)
+                 VALUES (?, ?, ?, ?, ?, ?)"""
+        values = (withdrawal_id, approver, approver_user_id, approver_role, decision, comment)
         if conn:
             conn.execute(sql, values)
         else:
@@ -1203,6 +1462,106 @@ class Database:
             ).fetchall()
             return [dict(r) for r in rows]
 
+    def get_reserved_withdrawal_shares(self, account_id: str, pool_id: str) -> float:
+        """Return shares reserved by pending/approved withdrawals that are not executed."""
+        with self._conn() as conn:
+            row = conn.execute(
+                """SELECT COALESCE(SUM(shares_requested), 0) AS reserved
+                   FROM withdrawal_requests
+                   WHERE account_id = ?
+                     AND COALESCE(source_pool_id, portfolio_id) = ?
+                     AND status IN ('PENDING', 'APPROVED')""",
+                (account_id, pool_id),
+            ).fetchone()
+            return float(row["reserved"] or 0.0)
+
+    def get_account_monthly_report(self, account_id: str, year: int, month: int) -> dict:
+        account = self.get_capital_account(account_id)
+        if account is None:
+            raise ValueError(f"资产账户不存在: {account_id}")
+        month_prefix = f"{int(year):04d}-{int(month):02d}"
+        asset_view = self.get_account_asset_view(account_id)
+        with self._conn() as conn:
+            ledger_rows = conn.execute(
+                """SELECT * FROM ledger_entries
+                   WHERE account_id = ? AND substr(created_at, 1, 7) = ?
+                   ORDER BY created_at, id""",
+                (account_id, month_prefix),
+            ).fetchall()
+            withdrawal_rows = conn.execute(
+                """SELECT * FROM withdrawal_requests
+                   WHERE account_id = ? AND substr(created_at, 1, 7) = ?
+                   ORDER BY created_at, id""",
+                (account_id, month_prefix),
+            ).fetchall()
+        ledger = [dict(row) for row in ledger_rows]
+        withdrawals = [dict(row) for row in withdrawal_rows]
+        deposits = sum(
+            float(entry["amount"] or 0.0)
+            for entry in ledger
+            if entry["entry_type"] == "DEPOSIT_CONFIRMED"
+        )
+        executed_withdrawals = sum(
+            float(entry["amount"] or 0.0)
+            for entry in ledger
+            if entry["entry_type"] == "WITHDRAWAL_EXECUTED"
+        )
+        return {
+            "report_type": "member_monthly",
+            "period": month_prefix,
+            "account": account,
+            "asset_view": asset_view,
+            "cashflows": {
+                "deposits": round(deposits, 2),
+                "withdrawals": round(executed_withdrawals, 2),
+                "net": round(deposits - executed_withdrawals, 2),
+            },
+            "ledger_entries": ledger,
+            "withdrawals": withdrawals,
+        }
+
+    def get_family_global_report(self, year: int, month: int, family_office_id: str = "default") -> dict:
+        month_prefix = f"{int(year):04d}-{int(month):02d}"
+        aum = self.get_family_aum_summary(family_office_id=family_office_id)
+        with self._conn() as conn:
+            ledger_rows = conn.execute(
+                """SELECT le.*, ca.account_name, fm.display_name AS member_name
+                   FROM ledger_entries le
+                   LEFT JOIN capital_accounts ca ON ca.id = le.account_id
+                   LEFT JOIN family_members fm ON fm.id = ca.member_id
+                   WHERE le.family_office_id = ? AND substr(le.created_at, 1, 7) = ?
+                   ORDER BY le.created_at, le.id""",
+                (family_office_id, month_prefix),
+            ).fetchall()
+            withdrawal_rows = conn.execute(
+                """SELECT wr.*, ca.account_name, fm.display_name AS member_name
+                   FROM withdrawal_requests wr
+                   LEFT JOIN capital_accounts ca ON ca.id = wr.account_id
+                   LEFT JOIN family_members fm ON fm.id = ca.member_id
+                   WHERE wr.family_office_id = ? AND substr(wr.created_at, 1, 7) = ?
+                   ORDER BY wr.created_at, wr.id""",
+                (family_office_id, month_prefix),
+            ).fetchall()
+        ledger = [dict(row) for row in ledger_rows]
+        withdrawals = [dict(row) for row in withdrawal_rows]
+        status_counts: dict[str, int] = {}
+        for withdrawal in withdrawals:
+            status = withdrawal.get("status") or "UNKNOWN"
+            status_counts[status] = status_counts.get(status, 0) + 1
+        return {
+            "report_type": "family_global",
+            "family_office_id": family_office_id,
+            "period": month_prefix,
+            "aum": aum,
+            "cashflows": {
+                "deposits": round(sum(float(e["amount"] or 0.0) for e in ledger if e["entry_type"] == "DEPOSIT_CONFIRMED"), 2),
+                "withdrawals": round(sum(float(e["amount"] or 0.0) for e in ledger if e["entry_type"] == "WITHDRAWAL_EXECUTED"), 2),
+            },
+            "withdrawal_status_counts": status_counts,
+            "ledger_entries": ledger,
+            "withdrawals": withdrawals,
+        }
+
     def save_audit_log(self, action: str, actor: str, detail: str = "", ip_address: str = "", conn=None):
         sql = "INSERT INTO audit_log (action, actor, detail, ip_address) VALUES (?, ?, ?, ?)"
         values = (action, actor, detail, ip_address)
@@ -1212,10 +1571,33 @@ class Database:
             with self._conn() as c:
                 c.execute(sql, values)
 
-    def get_audit_log(self, limit: int = 50) -> list[dict]:
+    def get_audit_log(
+        self,
+        limit: int = 50,
+        action: str | None = None,
+        actor: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
+    ) -> list[dict]:
+        where = []
+        values: list = []
+        if action:
+            where.append("action = ?")
+            values.append(action)
+        if actor:
+            where.append("actor = ?")
+            values.append(actor)
+        if since:
+            where.append("created_at >= ?")
+            values.append(since)
+        if until:
+            where.append("created_at <= ?")
+            values.append(until)
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
         with self._conn() as conn:
             rows = conn.execute(
-                "SELECT * FROM audit_log ORDER BY created_at DESC LIMIT ?", (limit,)
+                f"SELECT * FROM audit_log {where_sql} ORDER BY created_at DESC LIMIT ?",
+                values + [limit],
             ).fetchall()
             return [dict(r) for r in rows]
 
@@ -1228,14 +1610,833 @@ class Database:
             ).fetchone()
             return dict(row) if row else None
 
-    def create_user(self, username: str, password_hash: str, role: str = "viewer",
-                    display_name: str = "", email: str = ""):
+    def create_user(
+        self,
+        username: str,
+        password_hash: str,
+        role: str = "viewer",
+        display_name: str = "",
+        email: str = "",
+        member_id: str | None = None,
+    ):
+        if member_id and self.get_family_member(member_id) is None:
+            raise ValueError(f"家族成员不存在: {member_id}")
         with self._conn() as conn:
             conn.execute(
-                """INSERT INTO api_users (username, password_hash, role, display_name, email)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (username, password_hash, role, display_name, email),
+                """INSERT INTO api_users (username, password_hash, role, member_id, display_name, email)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (username, password_hash, role, member_id, display_name, email),
             )
+
+    # ── 家族办公室账户与授权 ──────────────────────────
+
+    def create_family_member(
+        self,
+        display_name: str,
+        member_type: str = "individual",
+        risk_profile: str = "balanced",
+        family_office_id: str = "default",
+        member_id: str | None = None,
+    ) -> dict:
+        member_id = member_id or f"mem_{uuid.uuid4().hex[:12]}"
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT INTO family_members
+                   (id, family_office_id, display_name, member_type, risk_profile)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (member_id, family_office_id, display_name, member_type, risk_profile),
+            )
+        member = self.get_family_member(member_id)
+        if member is None:
+            raise RuntimeError("创建家族成员失败")
+        return member
+
+    def get_family_member(self, member_id: str) -> Optional[dict]:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM family_members WHERE id = ?",
+                (member_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def list_family_members(self, family_office_id: str = "default") -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT * FROM family_members
+                   WHERE family_office_id = ?
+                   ORDER BY created_at DESC""",
+                (family_office_id,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def bind_user_member(self, username: str, member_id: str | None):
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE api_users SET member_id = ? WHERE username = ?",
+                (member_id, username),
+            )
+
+    def create_capital_account(
+        self,
+        member_id: str,
+        account_name: str,
+        base_currency: str = "USD",
+        default_portfolio_id: str = "us",
+        family_office_id: str = "default",
+        account_id: str | None = None,
+    ) -> dict:
+        account_id = account_id or f"acct_{uuid.uuid4().hex[:12]}"
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT INTO capital_accounts
+                   (id, family_office_id, member_id, account_name, base_currency, default_portfolio_id)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    account_id,
+                    family_office_id,
+                    member_id,
+                    account_name,
+                    base_currency,
+                    default_portfolio_id,
+                ),
+            )
+        account = self.get_capital_account(account_id)
+        if account is None:
+            raise RuntimeError("创建资产账户失败")
+        return account
+
+    def get_capital_account(self, account_id: str) -> Optional[dict]:
+        with self._conn() as conn:
+            row = conn.execute(
+                """SELECT ca.*, fm.display_name AS member_name
+                   FROM capital_accounts ca
+                   LEFT JOIN family_members fm ON fm.id = ca.member_id
+                   WHERE ca.id = ?""",
+                (account_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def list_capital_accounts(self, family_office_id: str = "default") -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT ca.*, fm.display_name AS member_name
+                   FROM capital_accounts ca
+                   LEFT JOIN family_members fm ON fm.id = ca.member_id
+                   WHERE ca.family_office_id = ?
+                   ORDER BY ca.created_at DESC""",
+                (family_office_id,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def grant_account_permission(
+        self,
+        username: str,
+        account_id: str,
+        permission: str = "view",
+    ) -> dict:
+        user = self.get_user_by_username(username)
+        if user is None:
+            raise ValueError(f"用户不存在: {username}")
+        if self.get_capital_account(account_id) is None:
+            raise ValueError(f"资产账户不存在: {account_id}")
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT OR IGNORE INTO account_permissions
+                   (user_id, account_id, permission)
+                   VALUES (?, ?, ?)""",
+                (user["id"], account_id, permission),
+            )
+        return {"username": username, "account_id": account_id, "permission": permission}
+
+    def revoke_account_permission(
+        self,
+        username: str,
+        account_id: str,
+        permission: str = "view",
+    ):
+        user = self.get_user_by_username(username)
+        if user is None:
+            return
+        with self._conn() as conn:
+            conn.execute(
+                """DELETE FROM account_permissions
+                   WHERE user_id = ? AND account_id = ? AND permission = ?""",
+                (user["id"], account_id, permission),
+            )
+
+    def user_has_account_permission(
+        self,
+        user_id: int,
+        account_id: str,
+        permission: str = "view",
+    ) -> bool:
+        with self._conn() as conn:
+            row = conn.execute(
+                """SELECT 1 FROM account_permissions
+                   WHERE user_id = ? AND account_id = ?
+                   AND permission IN (?, 'admin')
+                   LIMIT 1""",
+                (user_id, account_id, permission),
+            ).fetchone()
+            return row is not None
+
+    def list_user_accounts(
+        self,
+        user_id: int,
+        member_id: str | None = None,
+        permission: str = "view",
+    ) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT DISTINCT ca.*, fm.display_name AS member_name
+                   FROM capital_accounts ca
+                   LEFT JOIN account_permissions ap
+                     ON ap.account_id = ca.id AND ap.user_id = ?
+                   LEFT JOIN family_members fm ON fm.id = ca.member_id
+                   WHERE ca.member_id = ?
+                      OR ap.permission IN (?, 'admin')
+                   ORDER BY ca.created_at DESC""",
+                (user_id, member_id, permission),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def list_authorized_portfolio_ids(
+        self,
+        user_id: int,
+        member_id: str | None = None,
+        permission: str = "view",
+    ) -> list[str]:
+        accounts = self.list_user_accounts(user_id, member_id=member_id, permission=permission)
+        return sorted({a["default_portfolio_id"] for a in accounts if a.get("default_portfolio_id")})
+
+    def ensure_legacy_capital_account(
+        self,
+        actor: str,
+        portfolio_id: str = "us",
+        family_office_id: str = "default",
+    ) -> dict:
+        """
+        Compatibility bridge for pre-platform deposit callers.
+
+        New API paths require account_id. Older engine-level callers only pass a
+        depositor string, so we anchor those deposits to a deterministic legacy
+        account instead of allowing account-less ledger entries.
+        """
+        safe_actor = actor or "unknown"
+        suffix = uuid.uuid5(
+            uuid.NAMESPACE_DNS,
+            f"xirang:{family_office_id}:{safe_actor}:{portfolio_id}",
+        ).hex[:12]
+        member_id = f"mem_legacy_{suffix}"
+        account_id = f"acct_legacy_{suffix}"
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT OR IGNORE INTO family_members
+                   (id, family_office_id, display_name, member_type, risk_profile)
+                   VALUES (?, ?, ?, 'legacy', 'balanced')""",
+                (member_id, family_office_id, f"Legacy Depositor: {safe_actor}"),
+            )
+            conn.execute(
+                """INSERT OR IGNORE INTO capital_accounts
+                   (id, family_office_id, member_id, account_name, base_currency, default_portfolio_id)
+                   VALUES (?, ?, ?, ?, 'USD', ?)""",
+                (
+                    account_id,
+                    family_office_id,
+                    member_id,
+                    f"Legacy Deposit Account: {safe_actor}",
+                    portfolio_id,
+                ),
+            )
+        account = self.get_capital_account(account_id)
+        if account is None:
+            raise RuntimeError("创建兼容资产账户失败")
+        return account
+
+    # ── 平台化入金申请与总账 ──────────────────────────
+
+    def create_deposit_request(
+        self,
+        account_id: str,
+        amount: float,
+        requested_by: str,
+        portfolio_id: str = "us",
+        currency: str = "USD",
+        note: str = "",
+        external_reference: str = "",
+        family_office_id: str = "default",
+        request_id: str | None = None,
+        status: str = "REQUESTED",
+        conn=None,
+    ) -> dict:
+        request_id = request_id or f"dep_{uuid.uuid4().hex[:12]}"
+        sql = """INSERT INTO deposit_requests
+                   (id, family_office_id, account_id, portfolio_id, amount, currency,
+                    requested_by, status, external_reference, note)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+        values = (
+            request_id,
+            family_office_id,
+            account_id,
+            portfolio_id,
+            round(float(amount), 2),
+            currency,
+            requested_by,
+            status,
+            external_reference,
+            note,
+        )
+        if conn:
+            conn.execute(sql, values)
+            row = conn.execute(
+                "SELECT * FROM deposit_requests WHERE id = ?",
+                (request_id,),
+            ).fetchone()
+            return dict(row) if row else {"id": request_id}
+        with self._conn() as c:
+            c.execute(sql, values)
+            row = c.execute(
+                "SELECT * FROM deposit_requests WHERE id = ?",
+                (request_id,),
+            ).fetchone()
+            return dict(row) if row else {"id": request_id}
+
+    def get_deposit_request(self, request_id: str) -> Optional[dict]:
+        with self._conn() as conn:
+            row = conn.execute(
+                """SELECT dr.*, ca.account_name, fm.display_name AS member_name
+                   FROM deposit_requests dr
+                   LEFT JOIN capital_accounts ca ON ca.id = dr.account_id
+                   LEFT JOIN family_members fm ON fm.id = ca.member_id
+                   WHERE dr.id = ?""",
+                (request_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def list_deposit_requests(
+        self,
+        portfolio_id: str | None = None,
+        status: str | None = None,
+        account_ids: list[str] | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        where = []
+        values: list = []
+        if portfolio_id:
+            where.append("dr.portfolio_id = ?")
+            values.append(portfolio_id)
+        if status:
+            where.append("dr.status = ?")
+            values.append(status)
+        if account_ids is not None:
+            if not account_ids:
+                return []
+            placeholders = ", ".join(["?"] * len(account_ids))
+            where.append(f"dr.account_id IN ({placeholders})")
+            values.extend(account_ids)
+
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+        with self._conn() as conn:
+            rows = conn.execute(
+                f"""SELECT dr.*, ca.account_name, fm.display_name AS member_name
+                    FROM deposit_requests dr
+                    LEFT JOIN capital_accounts ca ON ca.id = dr.account_id
+                    LEFT JOIN family_members fm ON fm.id = ca.member_id
+                    {where_sql}
+                    ORDER BY dr.created_at DESC LIMIT ?""",
+                values + [limit],
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def update_deposit_request(
+        self,
+        request_id: str,
+        conn=None,
+        **kwargs,
+    ):
+        if not kwargs:
+            return
+        sets = ", ".join(f"{k} = ?" for k in kwargs)
+        values = list(kwargs.values()) + [request_id]
+        sql = f"""UPDATE deposit_requests
+                  SET {sets}, updated_at = CURRENT_TIMESTAMP
+                  WHERE id = ?"""
+        if conn:
+            conn.execute(sql, values)
+        else:
+            with self._conn() as c:
+                c.execute(sql, values)
+
+    def record_ledger_entry(
+        self,
+        account_id: str,
+        entry_type: str,
+        amount: float,
+        actor: str,
+        portfolio_id: str | None = None,
+        pool_id: str | None = None,
+        currency: str = "USD",
+        shares_delta: float | None = None,
+        share_price: float | None = None,
+        source_ref_type: str = "",
+        source_ref_id: str = "",
+        memo: str = "",
+        family_office_id: str = "default",
+        conn=None,
+    ) -> dict:
+        sql = """INSERT INTO ledger_entries
+                   (family_office_id, account_id, portfolio_id, pool_id, entry_type,
+                    amount, currency, shares_delta, share_price, actor,
+                    source_ref_type, source_ref_id, memo)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+        values = (
+            family_office_id,
+            account_id,
+            portfolio_id,
+            pool_id,
+            entry_type,
+            round(float(amount), 2),
+            currency,
+            shares_delta,
+            share_price,
+            actor,
+            source_ref_type,
+            source_ref_id,
+            memo,
+        )
+        if conn:
+            cursor = conn.execute(sql, values)
+            row = conn.execute(
+                "SELECT * FROM ledger_entries WHERE id = ?",
+                (cursor.lastrowid,),
+            ).fetchone()
+            return dict(row) if row else {"id": cursor.lastrowid}
+        with self._conn() as c:
+            cursor = c.execute(sql, values)
+            row = c.execute(
+                "SELECT * FROM ledger_entries WHERE id = ?",
+                (cursor.lastrowid,),
+            ).fetchone()
+            return dict(row) if row else {"id": cursor.lastrowid}
+
+    def list_ledger_entries(
+        self,
+        account_id: str | None = None,
+        portfolio_id: str | None = None,
+        entry_type: str | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        where = []
+        values: list = []
+        if account_id:
+            where.append("le.account_id = ?")
+            values.append(account_id)
+        if portfolio_id:
+            where.append("le.portfolio_id = ?")
+            values.append(portfolio_id)
+        if entry_type:
+            where.append("le.entry_type = ?")
+            values.append(entry_type)
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+        with self._conn() as conn:
+            rows = conn.execute(
+                f"""SELECT le.*, ca.account_name, fm.display_name AS member_name
+                    FROM ledger_entries le
+                    LEFT JOIN capital_accounts ca ON ca.id = le.account_id
+                    LEFT JOIN family_members fm ON fm.id = ca.member_id
+                    {where_sql}
+                    ORDER BY le.created_at DESC, le.id DESC LIMIT ?""",
+                values + [limit],
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def upsert_investment_pool(
+        self,
+        pool_id: str,
+        portfolio_id: str | None = None,
+        pool_type: str = "core",
+        currency: str = "USD",
+        nav: float = 0.0,
+        shares_outstanding: float = 0.0,
+        share_price: float = 100.0,
+        status: str = "ACTIVE",
+        family_office_id: str = "default",
+        last_valued_at: str | None = None,
+        conn=None,
+    ) -> dict:
+        portfolio_id = portfolio_id or pool_id
+        last_valued_at = last_valued_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        values = (
+            pool_id,
+            family_office_id,
+            portfolio_id,
+            pool_type,
+            currency,
+            round(float(nav), 2),
+            round(float(shares_outstanding), 8),
+            round(float(share_price), 8),
+            status,
+            last_valued_at,
+        )
+        sql = """INSERT INTO investment_pools
+                   (id, family_office_id, portfolio_id, pool_type, currency,
+                    nav, shares_outstanding, share_price, status, last_valued_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 ON CONFLICT(id) DO UPDATE SET
+                    family_office_id = excluded.family_office_id,
+                    portfolio_id = excluded.portfolio_id,
+                    pool_type = excluded.pool_type,
+                    currency = excluded.currency,
+                    nav = excluded.nav,
+                    shares_outstanding = excluded.shares_outstanding,
+                    share_price = excluded.share_price,
+                    status = excluded.status,
+                    last_valued_at = excluded.last_valued_at,
+                    updated_at = CURRENT_TIMESTAMP"""
+        if conn:
+            conn.execute(sql, values)
+            row = conn.execute("SELECT * FROM investment_pools WHERE id = ?", (pool_id,)).fetchone()
+            return dict(row) if row else {"id": pool_id}
+        with self._conn() as c:
+            c.execute(sql, values)
+            row = c.execute("SELECT * FROM investment_pools WHERE id = ?", (pool_id,)).fetchone()
+            return dict(row) if row else {"id": pool_id}
+
+    def get_investment_pool(self, pool_id: str, conn=None) -> Optional[dict]:
+        sql = "SELECT * FROM investment_pools WHERE id = ?"
+        if conn:
+            row = conn.execute(sql, (pool_id,)).fetchone()
+            return dict(row) if row else None
+        with self._conn() as c:
+            row = c.execute(sql, (pool_id,)).fetchone()
+            return dict(row) if row else None
+
+    def list_investment_pools(
+        self,
+        family_office_id: str = "default",
+        portfolio_id: str | None = None,
+        status: str | None = None,
+    ) -> list[dict]:
+        where = ["family_office_id = ?"]
+        values: list = [family_office_id]
+        if portfolio_id:
+            where.append("portfolio_id = ?")
+            values.append(portfolio_id)
+        if status:
+            where.append("status = ?")
+            values.append(status)
+        with self._conn() as conn:
+            rows = conn.execute(
+                f"""SELECT * FROM investment_pools
+                    WHERE {' AND '.join(where)}
+                    ORDER BY portfolio_id, id""",
+                values,
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def ensure_investment_pool(
+        self,
+        pool_id: str,
+        portfolio_id: str | None = None,
+        nav: float | None = None,
+        currency: str = "USD",
+        pool_type: str = "core",
+        conn=None,
+    ) -> dict:
+        existing = self.get_investment_pool(pool_id, conn=conn)
+        if existing:
+            return existing
+
+        portfolio_id = portfolio_id or pool_id
+        latest = self.get_latest_pool_nav_snapshot(pool_id, locked_only=True, conn=conn)
+        if latest:
+            return self.upsert_investment_pool(
+                pool_id=pool_id,
+                portfolio_id=portfolio_id,
+                pool_type=pool_type,
+                currency=currency,
+                nav=float(latest["nav"]),
+                shares_outstanding=float(latest["shares_outstanding"]),
+                share_price=float(latest["share_price"]),
+                conn=conn,
+            )
+
+        if nav is None:
+            try:
+                portfolio = self.get_portfolio(portfolio_id)
+                nav = float(portfolio["nav"])
+            except ValueError:
+                nav = 0.0
+        share_price = 100.0
+        shares_outstanding = float(nav) / share_price if float(nav) > 0 else 0.0
+        return self.upsert_investment_pool(
+            pool_id=pool_id,
+            portfolio_id=portfolio_id,
+            pool_type=pool_type,
+            currency=currency,
+            nav=float(nav),
+            shares_outstanding=shares_outstanding,
+            share_price=share_price,
+            conn=conn,
+        )
+
+    def get_latest_pool_nav_snapshot(
+        self,
+        pool_id: str,
+        locked_only: bool = True,
+        conn=None,
+    ) -> Optional[dict]:
+        sql = "SELECT * FROM pool_nav_snapshots WHERE pool_id = ?"
+        values: list = [pool_id]
+        if locked_only:
+            sql += " AND is_locked = 1"
+        sql += " ORDER BY created_at DESC, snapshot_date DESC LIMIT 1"
+        if conn:
+            row = conn.execute(sql, values).fetchone()
+            return dict(row) if row else None
+        with self._conn() as c:
+            row = c.execute(sql, values).fetchone()
+            return dict(row) if row else None
+
+    def save_pool_nav_snapshot(
+        self,
+        pool_id: str,
+        nav: float,
+        shares_outstanding: float,
+        share_price: float,
+        snapshot_date: str | None = None,
+        is_locked: bool = True,
+        source: str = "SYSTEM",
+        snapshot_id: str | None = None,
+        conn=None,
+    ) -> str:
+        snapshot_id = snapshot_id or f"nav_{uuid.uuid4().hex[:12]}"
+        snapshot_date = snapshot_date or datetime.now().strftime("%Y-%m-%d")
+        sql = """INSERT INTO pool_nav_snapshots
+                   (id, pool_id, nav, shares_outstanding, share_price, snapshot_date, is_locked, source)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)"""
+        values = (
+            snapshot_id,
+            pool_id,
+            round(float(nav), 2),
+            round(float(shares_outstanding), 8),
+            round(float(share_price), 8),
+            snapshot_date,
+            1 if is_locked else 0,
+            source,
+        )
+        if conn:
+            conn.execute(sql, values)
+            self.upsert_investment_pool(
+                pool_id=pool_id,
+                portfolio_id=pool_id,
+                nav=nav,
+                shares_outstanding=shares_outstanding,
+                share_price=share_price,
+                last_valued_at=f"{snapshot_date} 00:00:00",
+                conn=conn,
+            )
+        else:
+            with self._conn() as c:
+                c.execute(sql, values)
+                self.upsert_investment_pool(
+                    pool_id=pool_id,
+                    portfolio_id=pool_id,
+                    nav=nav,
+                    shares_outstanding=shares_outstanding,
+                    share_price=share_price,
+                    last_valued_at=f"{snapshot_date} 00:00:00",
+                    conn=c,
+                )
+        return snapshot_id
+
+    def ensure_initial_pool_nav_snapshot(
+        self,
+        pool_id: str,
+        nav: float,
+        default_share_price: float = 100.0,
+        conn=None,
+    ) -> dict:
+        latest = self.get_latest_pool_nav_snapshot(pool_id, locked_only=True, conn=conn)
+        if latest:
+            self.upsert_investment_pool(
+                pool_id=pool_id,
+                portfolio_id=pool_id,
+                nav=float(latest["nav"]),
+                shares_outstanding=float(latest["shares_outstanding"]),
+                share_price=float(latest["share_price"]),
+                conn=conn,
+            )
+            return latest
+        shares_outstanding = nav / default_share_price if nav > 0 else 0.0
+        snapshot_id = self.save_pool_nav_snapshot(
+            pool_id=pool_id,
+            nav=nav,
+            shares_outstanding=shares_outstanding,
+            share_price=default_share_price,
+            source="INITIALIZED_FROM_PORTFOLIO",
+            conn=conn,
+        )
+        if conn:
+            row = conn.execute("SELECT * FROM pool_nav_snapshots WHERE id = ?", (snapshot_id,)).fetchone()
+            if row:
+                return dict(row)
+        latest = self.get_latest_pool_nav_snapshot(pool_id, locked_only=True)
+        if latest is None:
+            raise RuntimeError("初始化投资池净值快照失败")
+        return latest
+
+    def revalue_investment_pool(
+        self,
+        pool_id: str,
+        nav: float,
+        actor: str = "system",
+        source: str = "NAV_REVALUED",
+        snapshot_date: str | None = None,
+        conn=None,
+    ) -> dict:
+        """Lock a new pool NAV and derive share_price from current shares."""
+        pool = self.ensure_investment_pool(pool_id, nav=nav, conn=conn)
+        shares_outstanding = float(pool.get("shares_outstanding") or 0.0)
+        if shares_outstanding <= 0 and float(nav) > 0:
+            shares_outstanding = round(float(nav) / 100.0, 8)
+        share_price = round(float(nav) / shares_outstanding, 8) if shares_outstanding > 0 else 100.0
+        snapshot_id = self.save_pool_nav_snapshot(
+            pool_id=pool_id,
+            nav=nav,
+            shares_outstanding=shares_outstanding,
+            share_price=share_price,
+            snapshot_date=snapshot_date,
+            source=source,
+            conn=conn,
+        )
+        result = self.get_investment_pool(pool_id, conn=conn)
+        if result is None:
+            raise RuntimeError("投资池重估失败")
+        result["snapshot_id"] = snapshot_id
+        result["actor"] = actor
+        return result
+
+    def get_account_pool_position(self, account_id: str, pool_id: str, conn=None) -> dict:
+        sql = "SELECT * FROM account_pool_positions WHERE account_id = ? AND pool_id = ?"
+        if conn:
+            row = conn.execute(sql, (account_id, pool_id)).fetchone()
+            if row:
+                return dict(row)
+        else:
+            with self._conn() as c:
+                row = c.execute(sql, (account_id, pool_id)).fetchone()
+                if row:
+                    return dict(row)
+        return {
+            "account_id": account_id,
+            "pool_id": pool_id,
+            "shares": 0.0,
+            "cost_basis": 0.0,
+        }
+
+    def adjust_account_pool_position(
+        self,
+        account_id: str,
+        pool_id: str,
+        shares_delta: float,
+        cost_basis_delta: float = 0.0,
+        conn=None,
+    ) -> dict:
+        if conn is None:
+            raise ValueError("账户份额更新必须在受控 ledger 事务内执行")
+        current = self.get_account_pool_position(account_id, pool_id, conn=conn)
+        new_shares = round(float(current.get("shares", 0.0)) + float(shares_delta), 8)
+        new_cost_basis = round(float(current.get("cost_basis", 0.0)) + float(cost_basis_delta), 2)
+        if new_shares < -1e-8:
+            raise ValueError("账户份额不足")
+        if new_cost_basis < 0:
+            new_cost_basis = 0.0
+        conn.execute(
+            """INSERT INTO account_pool_positions
+                   (account_id, pool_id, shares, cost_basis)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(account_id, pool_id) DO UPDATE SET
+                   shares = excluded.shares,
+                   cost_basis = excluded.cost_basis,
+                   updated_at = CURRENT_TIMESTAMP""",
+            (account_id, pool_id, new_shares, new_cost_basis),
+        )
+        return self.get_account_pool_position(account_id, pool_id, conn=conn)
+
+    def get_account_asset_view(self, account_id: str) -> dict:
+        account = self.get_capital_account(account_id)
+        if account is None:
+            raise ValueError(f"资产账户不存在: {account_id}")
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM account_pool_positions WHERE account_id = ? ORDER BY pool_id",
+                (account_id,),
+            ).fetchall()
+            positions = []
+            total_value = 0.0
+            total_cost_basis = 0.0
+            for row in rows:
+                pos = dict(row)
+                pool = self.get_investment_pool(pos["pool_id"], conn=conn)
+                snapshot = None
+                if pool is None:
+                    snapshot = self.get_latest_pool_nav_snapshot(pos["pool_id"], conn=conn)
+                share_price = float((pool or snapshot or {}).get("share_price") or 0.0)
+                market_value = round(float(pos["shares"]) * share_price, 2)
+                cost_basis = round(float(pos.get("cost_basis", 0.0)), 2)
+                total_value += market_value
+                total_cost_basis += cost_basis
+                positions.append({
+                    "pool_id": pos["pool_id"],
+                    "portfolio_id": (pool or {}).get("portfolio_id") or pos["pool_id"],
+                    "pool_type": (pool or {}).get("pool_type", "core"),
+                    "pool_status": (pool or {}).get("status", "ACTIVE"),
+                    "pool_nav": round(float((pool or snapshot or {}).get("nav") or 0.0), 2),
+                    "currency": (pool or {}).get("currency") or account.get("base_currency") or "USD",
+                    "shares": round(float(pos["shares"]), 8),
+                    "share_price": round(share_price, 8),
+                    "market_value": market_value,
+                    "cost_basis": cost_basis,
+                    "unrealized_pnl": round(market_value - cost_basis, 2),
+                })
+        return {
+            "account": account,
+            "positions": positions,
+            "total_value": round(total_value, 2),
+            "total_cost_basis": round(total_cost_basis, 2),
+            "unrealized_pnl": round(total_value - total_cost_basis, 2),
+        }
+
+    def get_family_aum_summary(self, family_office_id: str = "default") -> dict:
+        pools = self.list_investment_pools(family_office_id=family_office_id, status="ACTIVE")
+        total_nav = round(sum(float(pool.get("nav") or 0.0) for pool in pools), 2)
+        total_shares = round(sum(float(pool.get("shares_outstanding") or 0.0) for pool in pools), 8)
+        accounts = self.list_capital_accounts(family_office_id=family_office_id)
+        account_views = []
+        total_account_value = 0.0
+        for account in accounts:
+            view = self.get_account_asset_view(account["id"])
+            total_account_value += float(view.get("total_value") or 0.0)
+            account_views.append({
+                "account_id": account["id"],
+                "account_name": account["account_name"],
+                "member_id": account["member_id"],
+                "member_name": account.get("member_name"),
+                "total_value": view["total_value"],
+                "total_cost_basis": view["total_cost_basis"],
+                "unrealized_pnl": view["unrealized_pnl"],
+            })
+        return {
+            "family_office_id": family_office_id,
+            "pool_count": len(pools),
+            "account_count": len(accounts),
+            "total_pool_nav": total_nav,
+            "total_pool_shares": total_shares,
+            "total_account_value": round(total_account_value, 2),
+            "pools": pools,
+            "accounts": account_views,
+        }
 
     # ── Alpha 沙盒策略 ────────────────────────────────
 
