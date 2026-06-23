@@ -23,6 +23,11 @@ python -m uvicorn output.stage95_frontend_qa_server:app --host 127.0.0.1 --port 
 - 登录 QA-only mock 前端。
 - 关闭家训阅读弹窗后等待 `#stage95-shadow-audit .stage95-card` 渲染。
 - 检查 Stage 9.5 面板文本和控件。
+- 代码级 smoke 合同测试：
+
+```bash
+python -m pytest tests/test_stage95_frontend_smoke.py -q
+```
 
 断言结果：
 
@@ -35,8 +40,11 @@ python -m uvicorn output.stage95_frontend_qa_server:app --host 127.0.0.1 --port 
 | 显示 `WARNING` 影子账本状态 | PASS |
 | 显示 `1/60` 观察覆盖率 | PASS |
 | 显示券商不可用次数 | PASS |
+| 显示生产准入门禁 `NOT_APPROVED / READY_FOR_HUMAN_REVIEW` | PASS |
+| `READY_FOR_HUMAN_REVIEW` 不被解释成实盘、杠杆或下单批准 | PASS |
 | 显示只读提示，不提供交易/杠杆/Shadow 转 Live | PASS |
 | Stage 9.5 面板内无 button/link/input/select/textarea/role=button/onclick | PASS |
+| `tests/test_stage95_frontend_smoke.py` 防止准入门禁退化成控制面 | PASS |
 
 截图产物：
 
