@@ -256,6 +256,13 @@ const LANGS = {
     multiStrategyMissing: "暂无多策略影子观察报告",
     multiStrategyApiUnavailable: "多策略影子观察接口暂不可用",
     multiStrategyReadonlyHint: "这里只横向展示多套策略的只读影子审计结果，不提供交易、加杠杆或 Shadow 转 Live 控件。",
+    ibkrPreflightTitle: "IBKR 只读预检",
+    ibkrPreflightMissing: "暂无 IBKR 只读预检报告",
+    ibkrPreflightApiUnavailable: "IBKR 只读预检接口暂不可用",
+    ibkrPreflightConnection: "只读连接",
+    ibkrPreflightAttempted: "已尝试连接",
+    ibkrPreflightMode: "适配器模式",
+    ibkrPreflightReadonlyHint: "这里只展示 IBKR 只读预检状态。READY_FOR_READONLY_CONNECT 仅代表可人工尝试只读连接，不代表实盘、杠杆或下单获批。",
 
     // ── 出金管理 ──
     withdrawalMgmt: "出金管理",
@@ -751,6 +758,13 @@ const LANGS = {
     multiStrategyMissing: "No multi-strategy shadow report yet",
     multiStrategyApiUnavailable: "Multi-strategy shadow API is unavailable",
     multiStrategyReadonlyHint: "This only compares read-only shadow audit results across strategies. It provides no trading, leverage, or Shadow-to-Live control.",
+    ibkrPreflightTitle: "IBKR Read-Only Preflight",
+    ibkrPreflightMissing: "No IBKR read-only preflight report yet",
+    ibkrPreflightApiUnavailable: "IBKR read-only preflight API is unavailable",
+    ibkrPreflightConnection: "Read-Only Connection",
+    ibkrPreflightAttempted: "Connection Attempted",
+    ibkrPreflightMode: "Adapter Mode",
+    ibkrPreflightReadonlyHint: "This only displays IBKR read-only preflight status. READY_FOR_READONLY_CONNECT only means a human may attempt read-only connection; it is not live, leverage, or order approval.",
 
     // ── Withdrawals ──
     withdrawalMgmt: "Withdrawal Management",

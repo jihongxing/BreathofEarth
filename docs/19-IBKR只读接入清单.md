@@ -56,6 +56,37 @@ IBKR_CONID_QQQ=<conid>
 
 ## 四、接入前检查
 
+### 0. 本地只读预检
+
+在任何真实券商连接尝试之前，先运行默认不联网的预检：
+
+```bash
+python -m live.ibkr_readonly_preflight
+```
+
+该命令只检查本地环境变量、执行闸门和 `conid` 映射，并写出：
+
+- `data/shadow/ibkr_readonly_preflight_YYYYMMDD_HHMMSS.json`
+- `data/shadow/latest_ibkr_readonly_preflight.json`
+
+状态解释：
+
+| 状态 | 含义 | 操作 |
+|------|------|------|
+| `FAIL_CLOSED` | 发现真实执行闸门、券商下单闸门或实盘批准上下文 | 停止，只能先关闭闸门 |
+| `NOT_READY` | 缺少必需 IBKR 环境变量或生产资产 `conid` 映射 | 补齐环境，不连接券商 |
+| `READY_FOR_READONLY_CONNECT` | 本地静态检查通过，但尚未证明券商可达 | 可人工执行只读连接预检 |
+| `READY` | 显式 `--connect` 后，`BrokerMode.READ_ONLY` 连接成功 | 可进入 Stage 9.5 只读 smoke |
+| `ATTENTION` | 显式 `--connect` 后连接失败或返回不可用 | 先排查 Client Portal、账户或网络 |
+
+只有出现 `READY_FOR_READONLY_CONNECT` 后，才允许人工运行：
+
+```bash
+python -m live.ibkr_readonly_preflight --connect
+```
+
+`--connect` 只允许创建 `BrokerMode.READ_ONLY` 适配器并调用 `connect()`。它不读取订单、不提交订单、不撤单、不确认交易会话。任何 `FAIL_CLOSED / NOT_READY / ATTENTION` 都不能被解释成“券商环境可用”。
+
 ### 1. 连接检查
 
 - `/iserver/accounts` 可访问。
@@ -86,8 +117,10 @@ IBKR_CONID_QQQ=<conid>
 ## 五、接入顺序
 
 1. 先在本地离线 smoke 目录复跑一遍，确认手册和前端已一致。
-2. 再把 `XIRANG_SHADOW_AUDIT_DIR` 指到真实只读观察目录。
-3. 最后只启用读取报价和账户快照，不启用任何提交订单链路。
+2. 运行 `python -m live.ibkr_readonly_preflight`，必须达到 `READY_FOR_READONLY_CONNECT`。
+3. 人工确认 Client Portal Gateway 已启动后，再运行 `python -m live.ibkr_readonly_preflight --connect`。
+4. 只有只读预检达到 `READY`，再把 `XIRANG_SHADOW_AUDIT_DIR` 指到真实只读观察目录。
+5. 最后只启用读取报价和账户快照，不启用任何提交订单链路。
 
 ## 六、成功标准
 
@@ -114,6 +147,8 @@ IBKR_CONID_QQQ=<conid>
 
 如果这份清单准备好了，下一步就是：
 
-1. 在真实只读环境里跑一次 Stage 9.5 smoke。
-2. 把真实券商返回和离线 smoke 的差异记录进 QA 文档。
-3. 继续保持 `live_leverage_approved = false`，直到人工评审通过。
+1. 先运行 `python -m live.ibkr_readonly_preflight`。
+2. 只有它返回 `READY_FOR_READONLY_CONNECT`，再人工运行 `python -m live.ibkr_readonly_preflight --connect`。
+3. 在真实只读环境里跑一次 Stage 9.5 smoke。
+4. 把真实券商返回和离线 smoke 的差异记录进 QA 文档。
+5. 继续保持 `live_leverage_approved = false`，直到人工评审通过。

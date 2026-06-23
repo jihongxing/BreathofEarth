@@ -489,6 +489,9 @@ tbody tr:nth-child(even):hover {
 .stage95-admission {
   margin-top: 10px;
 }
+.ibkr-preflight-panel {
+  margin-top: 10px;
+}
 .stage95-section.level-healthy {
   border-color: rgba(90,154,110,0.28);
 }

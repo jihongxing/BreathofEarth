@@ -57,6 +57,20 @@ python -m live.stage95_observation_summary --shadow-dir data/shadow --expected-c
 
 用于真实 Stage 9.5 观察期。必须先确认券商适配器以 `READ_ONLY` 模式创建。
 
+在连接真实 IBKR 只读环境前，先运行本地预检：
+
+```bash
+python -m live.ibkr_readonly_preflight
+```
+
+该命令默认不联网，只检查执行闸门、IBKR 必需环境变量和生产资产 `conid` 映射。它必须返回 `READY_FOR_READONLY_CONNECT`，才允许人工尝试只读连接：
+
+```bash
+python -m live.ibkr_readonly_preflight --connect
+```
+
+只有 `--connect` 返回 `READY`，才进入下面的真实券商只读观察命令。`FAIL_CLOSED / NOT_READY / ATTENTION` 都必须先排查，不允许绕过进入 Stage 9.5。
+
 ```bash
 python -m live.stage95_shadow_runner --aum 2000000 --broker ibkr --skip-db
 python -m live.stage95_observation_summary --shadow-dir data/shadow --expected-cycles 60
@@ -119,6 +133,7 @@ python -m live.stage95_shadow_runner --aum 2000000 --broker ibkr
 
 每天运行后检查：
 
+- `latest_ibkr_readonly_preflight.json` 是否仍显示只读、交易禁用、实盘杠杆未批准。
 - `latest_stage95_cycle.json` 是否生成。
 - `latest_stage95_observation_summary.json` 是否生成。
 - `live_leverage_approved` 是否仍为 `false`。
@@ -212,4 +227,5 @@ python -m live.stage95_shadow_runner --aum 2000000 --broker ibkr
 
 1. 用本手册跑一次本地离线 smoke cycle，确认 `data/shadow/latest_*` 报告和前端显示一致。
 2. 按 [IBKR 只读接入清单](D:/codeSpace/BreathofEarth/docs/19-IBKR%E5%8F%AA%E8%AF%BB%E6%8E%A5%E5%85%A5%E6%B8%85%E5%8D%95.md) 准备环境变量和凭证，但不启用订单提交。
-3. 连续 60 个交易日执行 Stage 9.5 观察，再进入人工评审。
+3. 运行 `python -m live.ibkr_readonly_preflight`，静态通过后再人工运行 `python -m live.ibkr_readonly_preflight --connect`。
+4. 连续 60 个交易日执行 Stage 9.5 观察，再进入人工评审。

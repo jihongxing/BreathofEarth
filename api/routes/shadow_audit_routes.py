@@ -186,6 +186,53 @@ def normalize_margin_snapshot(payload: dict[str, Any] | None, path: Path, reason
     }
 
 
+def normalize_ibkr_readonly_preflight(
+    payload: dict[str, Any] | None,
+    path: Path,
+    reason: str | None,
+) -> dict[str, Any]:
+    if payload is None:
+        return _missing_component("ibkr_readonly_preflight", path, reason or "missing")
+
+    warnings = _safe_list(payload.get("warnings"))
+    blockers = _safe_list(payload.get("blockers"))
+    status = str(payload.get("status") or "UNKNOWN")
+    requires_attention = bool(payload.get("requires_attention") or warnings or blockers)
+    level = _shadow_level(status, requires_attention)
+
+    if status == "FAIL_CLOSED":
+        level = "critical"
+        requires_attention = True
+    elif status in {"NOT_READY", "ATTENTION", "READY_FOR_READONLY_CONNECT"}:
+        level = "warning"
+        requires_attention = True
+    elif status == "READY" and not blockers and not warnings:
+        level = "healthy"
+
+    return {
+        "enabled": True,
+        "status": status,
+        "level": level,
+        "last_run_at": payload.get("timestamp"),
+        "requires_attention": requires_attention,
+        "warnings": warnings,
+        "blockers": blockers,
+        "source_path": str(path),
+        "stale_report": False,
+        "age_hours": None,
+        "readonly": bool(payload.get("readonly", True)),
+        "dry_run": bool(payload.get("dry_run", True)),
+        "trading_disabled": bool(payload.get("trading_disabled", True)),
+        "live_leverage_approved": False,
+        "human_review_required": bool(payload.get("human_review_required", True)),
+        "connection": payload.get("connection") if isinstance(payload.get("connection"), dict) else {},
+        "env_audit": payload.get("env_audit") if isinstance(payload.get("env_audit"), dict) else {},
+        "assets": _safe_list(payload.get("assets")),
+        "production_conclusion": payload.get("production_conclusion", "OBSERVATION_ONLY_NO_LEVERAGE_APPROVAL"),
+        "report": payload,
+    }
+
+
 def build_shadow_audit_payload(
     portfolio_id: str,
     shadow_dir: Path | None = None,
@@ -246,6 +293,52 @@ def build_shadow_audit_payload(
             "shadow_sync": shadow_sync,
             "margin_snapshot": margin_snapshot,
         },
+    }
+
+
+def build_ibkr_readonly_preflight_payload(
+    portfolio_id: str,
+    shadow_dir: Path | None = None,
+    stale_after_hours: int = DEFAULT_STALE_AFTER_HOURS,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    shadow_dir = shadow_dir or DEFAULT_SHADOW_DIR
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    path = shadow_dir / "latest_ibkr_readonly_preflight.json"
+    payload, reason = _load_json_file(path)
+    preflight = _apply_stale_guard(
+        normalize_ibkr_readonly_preflight(payload, path, reason),
+        "ibkr_readonly_preflight",
+        now=now,
+        stale_after_hours=stale_after_hours,
+    )
+    level = preflight["level"]
+    if preflight["status"] == "missing":
+        status = "MISSING"
+    elif level == "critical":
+        status = "FAIL_CLOSED"
+    elif preflight["requires_attention"] or level == "warning":
+        status = "ATTENTION"
+    else:
+        status = "HEALTHY"
+
+    return {
+        "portfolio_id": portfolio_id,
+        "generated_at": _utc_now_text(),
+        "stage": "Stage 9.5 IBKR Read-Only Preflight",
+        "status": status,
+        "level": level,
+        "requires_attention": preflight["requires_attention"],
+        "warning_count": len(preflight.get("warnings") or []),
+        "blocker_count": len(preflight.get("blockers") or []),
+        "stale_after_hours": stale_after_hours,
+        "stale_report": preflight["stale_report"],
+        "live_leverage_approved": False,
+        "human_review_required": True,
+        "readonly": True,
+        "trading_disabled": True,
+        "production_conclusion": PRODUCTION_CONCLUSION,
+        "preflight": preflight,
     }
 
 
@@ -515,3 +608,13 @@ async def get_stage95_admission(
     """Return the read-only Stage 9.5 production admission gate state."""
     _ = user
     return build_stage95_admission_payload(portfolio_id)
+
+
+@router.get("/ibkr-readonly-preflight/{portfolio_id}")
+async def get_ibkr_readonly_preflight(
+    portfolio_id: str,
+    user: dict = Depends(get_current_user),
+):
+    """Return the read-only IBKR Stage 9.5 preflight report."""
+    _ = user
+    return build_ibkr_readonly_preflight_payload(portfolio_id)

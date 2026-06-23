@@ -377,11 +377,15 @@ async function loadDashboard() {
     var multiStrategyShadowPromise = api("/api/multi-strategy-shadow/" + currentPortfolio).catch(function(err) {
       return buildMultiStrategyShadowErrorPayload(err);
     });
+    var ibkrReadonlyPreflightPromise = api("/api/ibkr-readonly-preflight/" + currentPortfolio).catch(function(err) {
+      return buildIbkrReadonlyPreflightErrorPayload(err);
+    });
     var d = await api("/api/dashboard/" + currentPortfolio + "?days=90");
     var shadowAudit = await shadowAuditPromise;
     var stage95Summary = await stage95SummaryPromise;
     var stage95Admission = await stage95AdmissionPromise;
     var multiStrategyShadow = await multiStrategyShadowPromise;
+    var ibkrReadonlyPreflight = await ibkrReadonlyPreflightPromise;
 
     document.getElementById("stat-nav").textContent = d.currency + formatNum(d.current_nav);
 
@@ -398,7 +402,7 @@ async function loadDashboard() {
     renderDrawdownChart(d.drawdown_series);
     renderRiskEvents(d.risk_events);
     renderObservationOverview(d.observation_overview, d.currency);
-    renderStage95ShadowAudit(shadowAudit, stage95Summary, stage95Admission, d.currency, multiStrategyShadow);
+    renderStage95ShadowAudit(shadowAudit, stage95Summary, stage95Admission, d.currency, multiStrategyShadow, ibkrReadonlyPreflight);
     renderCoreObservationHistory(d.core_observation, d.currency);
     renderBrokerSync(d.broker_sync, d.currency, d.core_observation);
     renderShadowRun(d.shadow_run);
@@ -1011,7 +1015,34 @@ function buildMultiStrategyShadowErrorPayload(err) {
   };
 }
 
-function renderStage95ShadowAudit(auditData, summaryData, admissionData, currencySymbol, multiStrategyData) {
+function buildIbkrReadonlyPreflightErrorPayload(err) {
+  return {
+    status: "ATTENTION",
+    level: "warning",
+    requires_attention: true,
+    warning_count: 1,
+    blocker_count: 0,
+    live_leverage_approved: false,
+    human_review_required: true,
+    readonly: true,
+    trading_disabled: true,
+    production_conclusion: "Research PASS / Production design APPROVED / Live leveraged execution NOT YET APPROVED",
+    preflight: {
+      status: "UNAVAILABLE",
+      level: "warning",
+      requires_attention: true,
+      warnings: [err && err.message ? err.message : t("ibkrPreflightApiUnavailable")],
+      blockers: [],
+      connection: {},
+      readonly: true,
+      trading_disabled: true,
+      live_leverage_approved: false,
+      human_review_required: true,
+    },
+  };
+}
+
+function renderStage95ShadowAudit(auditData, summaryData, admissionData, currencySymbol, multiStrategyData, ibkrReadonlyPreflightData) {
   var el = document.getElementById("stage95-shadow-audit");
   if (!el) return;
 
@@ -1106,8 +1137,73 @@ function renderStage95ShadowAudit(auditData, summaryData, admissionData, currenc
         : '') +
       renderStage95ObservationSummary(summaryData, summary) +
       renderStage95AdmissionGate(admissionData) +
+      renderIbkrReadonlyPreflightPanel(ibkrReadonlyPreflightData) +
       renderMultiStrategyShadowPanel(multiStrategyData, currencySymbol) +
       '<div class="broker-sync-overall-note">' + esc(t("stage95ReadonlyHint")) + '</div>' +
+    '</div>';
+}
+
+function renderIbkrReadonlyPreflightPanel(data) {
+  if (!data || !data.preflight) {
+    return '' +
+      '<div class="stage95-section ibkr-preflight-panel level-missing">' +
+        '<div class="stage95-section-title">' + esc(t("ibkrPreflightTitle")) + '</div>' +
+        '<div class="stage95-empty">' + esc(t("ibkrPreflightMissing")) + '</div>' +
+      '</div>';
+  }
+
+  var preflight = data.preflight || {};
+  var connection = preflight.connection || {};
+  var blockers = (preflight.blockers || []).slice(0, 4);
+  var warnings = (preflight.warnings || []).slice(0, 3);
+  var level = data.level || preflight.level || "missing";
+  var status = data.status || preflight.status || "--";
+
+  return '' +
+    '<div class="stage95-section ibkr-preflight-panel level-' + esc(level) + '">' +
+      '<div class="stage95-summary-head">' +
+        '<div>' +
+          '<div class="stage95-section-title">' + esc(t("ibkrPreflightTitle")) + '</div>' +
+          '<div class="stage95-summary-subtitle">' + esc(t("stage95Status")) + ': ' + esc(String(status)) + '</div>' +
+        '</div>' +
+        '<span class="badge ' + brokerBadgeClass(level) + '">' + esc(
+          data.requires_attention ? t("brokerAttentionNeeded") : t("brokerAttentionNotNeeded")
+        ) + '</span>' +
+      '</div>' +
+      '<div class="stage95-summary-grid">' +
+        '<div class="stage95-summary-metric">' +
+          '<span>' + esc(t("ibkrPreflightConnection")) + '</span>' +
+          '<strong>' + esc(connection.connected === true ? t("stage95Yes") : t("stage95No")) + '</strong>' +
+        '</div>' +
+        '<div class="stage95-summary-metric">' +
+          '<span>' + esc(t("ibkrPreflightAttempted")) + '</span>' +
+          '<strong>' + esc(connection.attempted === true ? t("stage95Yes") : t("stage95No")) + '</strong>' +
+        '</div>' +
+        '<div class="stage95-summary-metric">' +
+          '<span>' + esc(t("stage95Age")) + '</span>' +
+          '<strong>' + esc(formatAgeHours(preflight.age_hours)) + '</strong>' +
+        '</div>' +
+        '<div class="stage95-summary-metric">' +
+          '<span>' + esc(t("stage95LiveLeverage")) + '</span>' +
+          '<strong>' + esc(data.live_leverage_approved === true ? t("stage95Approved") : t("stage95NotApproved")) + '</strong>' +
+        '</div>' +
+      '</div>' +
+      '<div class="stage95-meta stage95-summary-meta">' +
+        '<span>' + esc(t("ibkrPreflightMode")) + ': ' + esc(String(connection.mode || "read_only")) + '</span>' +
+        '<span>' + esc(t("stage95Broker")) + ': ' + esc(String(connection.broker || "ibkr").toUpperCase()) + '</span>' +
+        '<span>' + esc(t("stage95StaleReports")) + ': ' + esc(data.stale_report ? t("stage95Yes") : t("stage95No")) + '</span>' +
+      '</div>' +
+      (blockers.length
+        ? '<div class="shadow-run-warnings stage95-warnings">' + blockers.map(function(item) {
+            return '<div class="shadow-run-warning">' + esc(item) + '</div>';
+          }).join("") + '</div>'
+        : '') +
+      (warnings.length
+        ? '<div class="shadow-run-warnings stage95-warnings">' + warnings.map(function(item) {
+            return '<div class="shadow-run-warning">' + esc(item) + '</div>';
+          }).join("") + '</div>'
+        : '') +
+      '<div class="broker-sync-overall-note">' + esc(t("ibkrPreflightReadonlyHint")) + '</div>' +
     '</div>';
 }
 
