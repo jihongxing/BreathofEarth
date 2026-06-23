@@ -3,6 +3,14 @@
 > 本文件定义 `codex/cagr-uplift-with-mdd-guardrails` 分支的研究边界。
 > 它不是生产策略变更，不是实盘授权，也不是提高卫星仓位或放松风控阈值的许可。
 
+> **STRATEGIC AUDIT WARNING / 战略审计警告**
+>
+> `calibrated_base_case (7.03%)` 属于研究口径下的精细化微观模拟（Research Estimation），用途是校准静态拖累模型的参数化偏差。
+>
+> 本模型采用的年度利差序列与税率场景表，不等同于 Interactive Brokers 的真实对账单（Broker Statement），也不构成任何针对个人、离岸公司、家办实体或其他法律主体的税务合规意见（Tax Opinion）。
+>
+> `LIVE LEVERAGED EXECUTION NOT YET APPROVED` 仍具有绝对效力。在 Stage 9.5 的 60 个交易日影子同步跟踪完成之前，禁止将本文件中的任何校准收益作为实盘资本分配、加杠杆、自动交易或生产权重变更依据。
+
 ## 一、研究目标
 
 当前 90/10 生产候选在第一版真实摩擦压力审计下：

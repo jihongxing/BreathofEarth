@@ -235,3 +235,10 @@ def test_classify_execution_event_maps_actions():
     assert audit.classify_execution_event("进入非对称防御") == "acute"
     assert audit.classify_execution_event("进入宏观慢熊防御") == "macro"
     assert audit.classify_execution_event("年度再平衡") == "rebalance"
+
+
+def test_research_audit_fails_closed_when_live_gate_enabled(monkeypatch):
+    monkeypatch.setenv("XIRANG_ENABLE_LIVE_CORE_EXECUTION", "1")
+
+    with pytest.raises(RuntimeError, match="research-only"):
+        audit.assert_research_only_runtime()

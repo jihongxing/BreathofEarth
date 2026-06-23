@@ -1,6 +1,10 @@
 """
 CAGR uplift bypass audit.
 
+RESEARCH-ONLY WARNING:
+This module is a bypass research audit. It must never be imported as a live
+execution configuration, broker executor, or production trading signal source.
+
 This module keeps the audited 90/10 topology, MA150 macro filter, acute
 shifter, recovery rules, and satellite size unchanged. Experiments are isolated
 to bypass sleeves:
@@ -18,6 +22,7 @@ from dataclasses import dataclass
 from datetime import date
 import hashlib
 import json
+import os
 from pathlib import Path
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -76,6 +81,28 @@ HARSH_REAL_WORLD_SCENARIO = RealWorldFrictionScenario(
     operational_failure_drag_bps=50,
     tail_failure_shock_bps=150,
 )
+LIVE_GATE_ENV_VARS = {
+    "XIRANG_ENABLE_LIVE_CORE_EXECUTION": {"1", "true", "TRUE", "yes", "YES"},
+    "IBKR_ENABLE_ORDER_SUBMISSION": {"1", "true", "TRUE", "yes", "YES"},
+}
+LIVE_EXECUTOR_VALUES = {"auto", "semi_auto", "broker", "live"}
+
+
+def assert_research_only_runtime() -> None:
+    """Fail closed if this research audit is run with live execution gates enabled."""
+    enabled = [
+        key
+        for key, truthy_values in LIVE_GATE_ENV_VARS.items()
+        if os.environ.get(key, "") in truthy_values
+    ]
+    executor = os.environ.get("XIRANG_EXECUTOR", "").strip().lower()
+    if executor in LIVE_EXECUTOR_VALUES:
+        enabled.append(f"XIRANG_EXECUTOR={executor}")
+    if enabled:
+        raise RuntimeError(
+            "cagr_uplift_audit is research-only and cannot run while live "
+            f"execution gates are enabled: {', '.join(enabled)}"
+        )
 
 
 @dataclass(frozen=True)
@@ -997,6 +1024,7 @@ def annual_calibrated_ledger(result: CalibratedFrictionResult) -> pd.DataFrame:
 def run_calibrated_friction_audit(
     matrix_path: Path = FRICTION_MATRIX_FILE,
 ) -> dict[str, CalibratedFrictionResult]:
+    assert_research_only_runtime()
     assumptions = load_annual_friction_assumptions(matrix_path)
     research = production_candidate_nav()
     exposures = build_production_exposure_frame()
@@ -1024,6 +1052,7 @@ def run_trend_satellite_uplift_audit(
     allow_download: bool = True,
     trend_snapshot_dir: Path = TREND_SNAPSHOT_DIR,
 ) -> list[TrendSatelliteAuditRow]:
+    assert_research_only_runtime()
     rows: list[TrendSatelliteAuditRow] = []
 
     dbmf_satellite, dbmf_sources = run_static_satellite_sleeve(
@@ -1145,6 +1174,7 @@ def run_cash_proxy_uplift_audit(
     allow_download: bool = True,
     snapshot_dir: Path = CASH_PROXY_SNAPSHOT_DIR,
 ) -> list[CashProxyAuditRow]:
+    assert_research_only_runtime()
     rows: list[CashProxyAuditRow] = []
     for ticker in tickers or CASH_PROXY_TICKERS:
         defensive_run = run_defensive_cash_proxy(
