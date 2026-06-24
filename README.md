@@ -167,6 +167,20 @@ python -m live.stage95_observation_summary --shadow-dir data/shadow --expected-c
 
 第一条命令会写出 `latest_shadow_sync.json`、`latest_margin_snapshot.json` 与 `latest_stage95_cycle.json`。第二条命令会生成 `latest_stage95_observation_summary.json`，汇总 60 日观察覆盖率、券商不可用次数、滑点和保证金字段覆盖率。`margin_monitor` 在券商不可达或保证金字段缺失时必须返回 `UNAVAILABLE`，不能推导安全结论。
 
+接通真实 IBKR 只读环境前，先跑默认不联网的预检：
+
+```bash
+python -m live.ibkr_readonly_preflight
+```
+
+只有它返回 `READY_FOR_READONLY_CONNECT`，才允许人工执行：
+
+```bash
+python -m live.ibkr_readonly_preflight --connect
+```
+
+`--connect` 仍然只创建 `BrokerMode.READ_ONLY` 适配器并调用连接检查，不提交订单、不撤单、不确认交易会话。`FAIL_CLOSED / NOT_READY / ATTENTION` 都必须先排查，不能绕过进入真实券商 Stage 9.5。
+
 Stage 9.5 的 FastAPI 只读接口与前端面板已经接入。`/api/stage95-admission/{portfolio_id}` 会把最新影子账本、保证金快照和 60 日观察汇总合成为生产准入门禁，只返回 `NOT_APPROVED` 或 `READY_FOR_HUMAN_REVIEW`。后者只代表证据链足够进入人工评审，不代表实盘、杠杆或下单获批。缺失、过期、不可解析、券商不可达或保证金字段缺失的报告必须显示为需要关注，不能被渲染成安全状态。该面板不提供交易、加杠杆或 Shadow 转 Live 的入口。
 
 多策略影子审计平台也已经接入只读链路。`/api/multi-strategy-shadow/{portfolio_id}` 会读取 `latest_multi_strategy_shadow.json`，前端在 Stage 9.5 区域展示多策略横向对比，包括策略状态、准入状态、目标权重、滑点状态和保证金快照。该面板只展示后端审计结论，不在前端重新计算准入，不提供交易、加杠杆或 Shadow 转 Live 控件。缺失、过期或不可解析报告必须显示为 `UNAVAILABLE / WARNING / NOT_APPROVED`，不能被渲染成安全状态。
@@ -265,6 +279,10 @@ python -m runner.daily_runner
 # Stage 9.5：生产候选影子观察，不下单
 python -m live.stage95_shadow_runner --aum 2000000 --no-broker --skip-db
 python -m live.stage95_observation_summary --shadow-dir data/shadow --expected-cycles 60
+
+# IBKR 真实只读环境预检：先静态检查，再人工连接
+python -m live.ibkr_readonly_preflight
+python -m live.ibkr_readonly_preflight --connect
 ```
 
 ## 常用命令

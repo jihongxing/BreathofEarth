@@ -401,3 +401,163 @@ def test_stage95_admission_api_requires_login_and_returns_readonly_gate(monkeypa
     finally:
         client.close()
         db_path.unlink(missing_ok=True)
+
+
+def test_build_ibkr_readonly_preflight_payload_reports_missing_file(tmp_path):
+    payload = shadow_audit_routes.build_ibkr_readonly_preflight_payload("us", shadow_dir=tmp_path)
+
+    assert payload["status"] == "MISSING"
+    assert payload["level"] == "missing"
+    assert payload["requires_attention"] is True
+    assert payload["live_leverage_approved"] is False
+    assert payload["readonly"] is True
+    assert payload["trading_disabled"] is True
+    assert payload["preflight"]["requires_attention"] is True
+    assert payload["preflight"]["source_path"].endswith("latest_ibkr_readonly_preflight.json")
+
+
+def test_build_ibkr_readonly_preflight_payload_static_ready_requires_attention(tmp_path):
+    (tmp_path / "latest_ibkr_readonly_preflight.json").write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-06-23T10:00:00Z",
+                "status": "READY_FOR_READONLY_CONNECT",
+                "readonly": True,
+                "dry_run": True,
+                "trading_disabled": True,
+                "live_leverage_approved": False,
+                "human_review_required": True,
+                "warnings": [],
+                "blockers": [],
+                "connection": {
+                    "requested": False,
+                    "attempted": False,
+                    "broker": "ibkr",
+                    "mode": "read_only",
+                    "connected": False,
+                },
+                "assets": ["SPY", "TLT", "GLD", "SHV", "QQQ"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    payload = shadow_audit_routes.build_ibkr_readonly_preflight_payload(
+        "us",
+        shadow_dir=tmp_path,
+        now=datetime(2026, 6, 23, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert payload["status"] == "ATTENTION"
+    assert payload["level"] == "warning"
+    assert payload["requires_attention"] is True
+    assert payload["preflight"]["status"] == "READY_FOR_READONLY_CONNECT"
+    assert payload["preflight"]["connection"]["attempted"] is False
+
+
+def test_build_ibkr_readonly_preflight_payload_ready_after_connect_is_healthy(tmp_path):
+    (tmp_path / "latest_ibkr_readonly_preflight.json").write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-06-23T10:00:00Z",
+                "status": "READY",
+                "readonly": True,
+                "dry_run": True,
+                "trading_disabled": True,
+                "live_leverage_approved": False,
+                "human_review_required": True,
+                "warnings": [],
+                "blockers": [],
+                "connection": {
+                    "requested": True,
+                    "attempted": True,
+                    "broker": "ibkr",
+                    "mode": "read_only",
+                    "connected": True,
+                },
+                "assets": ["SPY", "TLT", "GLD", "SHV", "QQQ"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    payload = shadow_audit_routes.build_ibkr_readonly_preflight_payload(
+        "us",
+        shadow_dir=tmp_path,
+        now=datetime(2026, 6, 23, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert payload["status"] == "HEALTHY"
+    assert payload["level"] == "healthy"
+    assert payload["requires_attention"] is False
+    assert payload["live_leverage_approved"] is False
+    assert payload["preflight"]["connection"]["connected"] is True
+
+
+def test_build_ibkr_readonly_preflight_payload_fail_closed_is_critical(tmp_path):
+    (tmp_path / "latest_ibkr_readonly_preflight.json").write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-06-23T10:00:00Z",
+                "status": "FAIL_CLOSED",
+                "readonly": True,
+                "dry_run": True,
+                "trading_disabled": True,
+                "live_leverage_approved": False,
+                "human_review_required": True,
+                "warnings": [],
+                "blockers": ["IBKR_ENABLE_ORDER_SUBMISSION is enabled; read-only preflight must fail closed"],
+                "connection": {"requested": False, "attempted": False, "connected": False},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    payload = shadow_audit_routes.build_ibkr_readonly_preflight_payload(
+        "us",
+        shadow_dir=tmp_path,
+        now=datetime(2026, 6, 23, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert payload["status"] == "FAIL_CLOSED"
+    assert payload["level"] == "critical"
+    assert payload["requires_attention"] is True
+    assert payload["blocker_count"] == 1
+    assert payload["preflight"]["live_leverage_approved"] is False
+
+
+def test_ibkr_readonly_preflight_api_requires_login_and_returns_readonly_payload(monkeypatch, tmp_path):
+    (tmp_path / "latest_ibkr_readonly_preflight.json").write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-06-23T10:00:00Z",
+                "status": "READY",
+                "readonly": True,
+                "dry_run": True,
+                "trading_disabled": True,
+                "live_leverage_approved": False,
+                "human_review_required": True,
+                "warnings": [],
+                "blockers": [],
+                "connection": {"requested": True, "attempted": True, "connected": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(shadow_audit_routes, "DEFAULT_SHADOW_DIR", tmp_path)
+    client, db_path, headers = _client_with_admin()
+    try:
+        unauthorized = client.get("/api/ibkr-readonly-preflight/us")
+        assert unauthorized.status_code == 401
+
+        response = client.get("/api/ibkr-readonly-preflight/us", headers=headers)
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["status"] == "HEALTHY"
+        assert body["readonly"] is True
+        assert body["trading_disabled"] is True
+        assert body["live_leverage_approved"] is False
+        assert body["preflight"]["connection"]["connected"] is True
+    finally:
+        client.close()
+        db_path.unlink(missing_ok=True)
