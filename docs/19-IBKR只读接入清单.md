@@ -24,6 +24,8 @@
 
 ## 三、环境变量
 
+可从项目根目录的 `.env.ibkr-readonly.example` 复制只读模板到本地安全位置后填写。模板故意不包含真实账户号、真实 `conid` 或任何订单提交开关。
+
 ### 1. 只读连接
 
 至少准备：
@@ -147,8 +149,9 @@ python -m live.ibkr_readonly_preflight --connect
 
 如果这份清单准备好了，下一步就是：
 
-1. 先运行 `python -m live.ibkr_readonly_preflight`。
-2. 只有它返回 `READY_FOR_READONLY_CONNECT`，再人工运行 `python -m live.ibkr_readonly_preflight --connect`。
-3. 在真实只读环境里跑一次 Stage 9.5 smoke。
-4. 把真实券商返回和离线 smoke 的差异记录进 QA 文档。
-5. 继续保持 `live_leverage_approved = false`，直到人工评审通过。
+1. 参考 `.env.ibkr-readonly.example` 补齐本地只读环境变量。
+2. 先运行 `python -m live.ibkr_readonly_preflight`。
+3. 只有它返回 `READY_FOR_READONLY_CONNECT`，再人工运行 `python -m live.ibkr_readonly_preflight --connect`。
+4. 在真实只读环境里跑一次 Stage 9.5 smoke。
+5. 把真实券商返回和离线 smoke 的差异记录进 QA 文档，例如 `docs/25-IBKR只读预检记录.md`。
+6. 继续保持 `live_leverage_approved = false`，直到人工评审通过。

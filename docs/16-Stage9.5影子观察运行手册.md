@@ -63,6 +63,8 @@ python -m live.stage95_observation_summary --shadow-dir data/shadow --expected-c
 python -m live.ibkr_readonly_preflight
 ```
 
+只读环境变量模板位于 `.env.ibkr-readonly.example`。该模板只用于本地安全配置，不应写入真实账户号、真实 `conid`、令牌或任何订单提交开关。
+
 该命令默认不联网，只检查执行闸门、IBKR 必需环境变量和生产资产 `conid` 映射。它必须返回 `READY_FOR_READONLY_CONNECT`，才允许人工尝试只读连接：
 
 ```bash

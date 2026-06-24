@@ -173,6 +173,8 @@ python -m live.stage95_observation_summary --shadow-dir data/shadow --expected-c
 python -m live.ibkr_readonly_preflight
 ```
 
+只读环境变量可以从 [.env.ibkr-readonly.example](D:/codeSpace/BreathofEarth/.env.ibkr-readonly.example) 复制到本地安全位置后填写。不要提交真实账户号、`conid`、Client Portal 地址、令牌或任何订单提交开关。
+
 只有它返回 `READY_FOR_READONLY_CONNECT`，才允许人工执行：
 
 ```bash
@@ -330,6 +332,7 @@ BreathofEarth/
 - [生产候选方案与后续开发指南](D:/codeSpace/BreathofEarth/docs/15-%E7%94%9F%E4%BA%A7%E5%80%99%E9%80%89%E6%96%B9%E6%A1%88%E4%B8%8E%E5%90%8E%E7%BB%AD%E5%BC%80%E5%8F%91%E6%8C%87%E5%8D%97.md)
 - [Stage 9.5 影子观察运行手册](D:/codeSpace/BreathofEarth/docs/16-Stage9.5%E5%BD%B1%E5%AD%90%E8%A7%82%E5%AF%9F%E8%BF%90%E8%A1%8C%E6%89%8B%E5%86%8C.md)
 - [IBKR 只读接入清单](D:/codeSpace/BreathofEarth/docs/19-IBKR%E5%8F%AA%E8%AF%BB%E6%8E%A5%E5%85%A5%E6%B8%85%E5%8D%95.md)
+- [IBKR 只读预检记录](D:/codeSpace/BreathofEarth/docs/25-IBKR%E5%8F%AA%E8%AF%BB%E9%A2%84%E6%A3%80%E8%AE%B0%E5%BD%95.md)
 - [真实摩擦压力审计](D:/codeSpace/BreathofEarth/docs/20-%E7%9C%9F%E5%AE%9E%E6%91%A9%E6%93%A6%E5%8E%8B%E5%8A%9B%E5%AE%A1%E8%AE%A1.md)
 - [Benchmark 对比审计](D:/codeSpace/BreathofEarth/docs/21-Benchmark%E5%AF%B9%E6%AF%94%E5%AE%A1%E8%AE%A1.md)
 - [CAGR 提升研究计划](D:/codeSpace/BreathofEarth/docs/22-CAGR%E6%8F%90%E5%8D%87%E7%A0%94%E7%A9%B6%E8%AE%A1%E5%88%92.md)
